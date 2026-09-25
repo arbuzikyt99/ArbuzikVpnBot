@@ -35,8 +35,9 @@ from aiogram.filters import BaseFilter, Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
-    BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup,
-    KeyboardButton, MenuButtonWebApp, Message, ReplyKeyboardMarkup, WebAppInfo,
+    BotCommand, BufferedInputFile, CallbackQuery, InlineKeyboardButton,
+    InlineKeyboardMarkup, KeyboardButton, MenuButtonWebApp, Message,
+    ReplyKeyboardMarkup, WebAppInfo,
 )
 
 # ============================================================
@@ -94,6 +95,13 @@ MINIAPP_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "miniapp
 SSH = r"C:\Program Files\Git\usr\bin\ssh.exe"  # туннель нужен только локально
 
 BRAND = "Арбузик VPN 🍉"
+SUPPORT_USERNAME = "@ArbuzikV_bot"  # юзернейм поддержки (для документации)
+PRIVACY_URL = "https://telegra.ph/Politika-konfidencialnosti--Arbuzik-VPN-09-25"
+TERMS_URL = "https://telegra.ph/Polzovatelskoe-soglashenie--Arbuzik-VPN-09-25"
+BOT_DESCRIPTION = (
+    "Сервис «Арбузик VPN»: доступ к частной сети по подписке. "
+    "Тарифы от 85 ₽, пробный период. Информация: /info  ·  verplatega"
+)
 WELCOME = (
     f"Привет! Это <b>{BRAND}</b>\n\n"
     "Быстрый и безопасный VPN 🇩🇪\n\n"
@@ -476,7 +484,7 @@ def main_kb() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="📋 Моя подписка"), KeyboardButton(text="🎁 Бесплатная")],
             [KeyboardButton(text="🔑 Мой ключ"), KeyboardButton(text="💳 Купить подписку")],
             [KeyboardButton(text="🍉 Мини-приложение"), KeyboardButton(text="📱 Приложения")],
-            [KeyboardButton(text="💬 Поддержка")],
+            [KeyboardButton(text="ℹ️ Инфо"), KeyboardButton(text="💬 Поддержка")],
         ],
     )
 
@@ -526,6 +534,15 @@ def pay_url_kb(pay_url: str) -> InlineKeyboardMarkup:
 def cancel_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(resize_keyboard=True,
                                keyboard=[[KeyboardButton(text="❌ Отмена")]])
+
+
+def info_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📜 Политика конфиденциальности", url=PRIVACY_URL)],
+        [InlineKeyboardButton(text="📄 Пользовательское соглашение", url=TERMS_URL)],
+        [InlineKeyboardButton(text="💳 Тарифы и цены", callback_data="info_tariffs")],
+        [InlineKeyboardButton(text="💬 Контакты поддержки", callback_data="info_support")],
+    ])
 
 
 def qr_photo(data: str) -> BufferedInputFile:
@@ -1306,6 +1323,45 @@ async def apps_info(message: Message):
     )
 
 
+# ---------- информация (документы, тарифы, поддержка) ----------
+
+@router.message(Command("info"))
+@router.message(F.text == "ℹ️ Инфо")
+async def info_menu(message: Message):
+    await message.answer(
+        f"{BRAND}\n\n"
+        "ℹ️ <b>Информация о сервисе</b>\n\n"
+        "Ниже — документы, тарифы и контакты. "
+        "Всегда доступно по команде /info.",
+        reply_markup=info_kb(),
+    )
+
+
+@router.callback_query(F.data == "info_tariffs")
+async def info_tariffs(cb: CallbackQuery):
+    lines = ["💳 <b>Тарифы Арбузик VPN</b>", ""]
+    for name, days, devices, price in TARIFFS:
+        lines.append(f"▫️ <b>{name}</b> — {price} ₽ ({days} дн., до {devices} устройств)")
+    lines.append(f"Трафик: <b>{PAID_GB} ГБ</b>")
+    lines.append(f"🎁 Бесплатный пробный период: {TRIAL_DAYS} дн. (не более {TRIAL_LIMIT} раз)")
+    lines.append("\nОплата — криптовалютой через CryptoBot. "
+                 "Цена и кнопка оплаты показываются перед платежом.")
+    await cb.message.answer("\n".join(lines))
+    await cb.answer()
+
+
+@router.callback_query(F.data == "info_support")
+async def info_support(cb: CallbackQuery):
+    await cb.message.answer(
+        "💬 <b>Поддержка</b>\n\n"
+        f"Телеграм-бот поддержки: {SUPPORT_USERNAME}\n"
+        "Опишите проблему в этом боте (кнопка «💬 Поддержка») — "
+        "ответ придёт вам в чат.\n\n"
+        "Документы: /info",
+    )
+    await cb.answer()
+
+
 # ---------- поддержка ----------
 
 class SupportStates(StatesGroup):
@@ -1613,6 +1669,15 @@ async def main():
     dp.include_routers(admin_router, router)
     me = await BOT.get_me()
     log.info("Бот запущен: @%s", me.username)
+    try:
+        await BOT.set_my_description(BOT_DESCRIPTION)
+        await BOT.set_my_commands([
+            BotCommand(command="start", description="Начало работы"),
+            BotCommand(command="info", description="Информация: документы, тарифы, поддержка"),
+        ])
+        log.info("Описание и команды бота обновлены")
+    except Exception as e:
+        log.error("set_my_description: %s", e)
     if on_render and MINIAPP_URL:
         await apply_menu_button()  # стабильный URL — ставим кнопку сразу
     if GH_TOKEN:
