@@ -555,15 +555,27 @@ def qr_photo(data: str) -> BufferedInputFile:
 # ============================================================
 
 async def ensure_client(tg_id: int, days: int, traffic_gb: int, device_limit: int) -> dict:
-    """Вернуть клиента панели; создать при отсутствии."""
+    """Вернуть клиента панели; создать при отсутствии.
+
+    Если клиент с таким именем уже есть в панели (например, после сброса
+    базы бота) — подключаем существующий, не создавая заново.
+    """
     user = get_user(tg_id)
     if user and user["client_name"]:
         client = await api.get(user["client_name"])
         if client:
             return client
     name = client_name_for(tg_id)
-    client = await api.create(name, days=days, traffic_gb=traffic_gb,
-                              device_limit=device_limit)
+    try:
+        client = await api.create(name, days=days, traffic_gb=traffic_gb,
+                                  device_limit=device_limit)
+    except PanelError as e:
+        if "already_exists" in str(e) or "exists" in str(e) or "conflict" in str(e).lower():
+            client = await api.get(name)
+            if client is None:
+                raise
+        else:
+            raise
     set_client(tg_id, name)
     return client
 
@@ -718,11 +730,14 @@ class MiniAppHandler(BaseHTTPRequestHandler):
                 c = None
             if c:
                 limit = c.get("traffic_limit_bytes", 0)
+                used_gb = c.get("traffic_used_bytes", 0) / 1024**3
                 resp["sub"] = {
                     "days": max(c.get("left_days", 0), 0),
                     "until": c["expires_at"],
-                    "used": f"{c.get('traffic_used_bytes', 0) / 1024**3:.2f}",
+                    "used": f"{used_gb:.2f}",
                     "limit": "∞" if not limit else f"{limit / 1024**3:.0f}",
+                    "used_gb": round(used_gb, 2),
+                    "limit_gb": None if not limit else round(limit / 1024**3, 1),
                     "devices": f"{c.get('devices_count', 0)} / {c.get('device_limit', 0)}",
                 }
                 resp["status"] = "active" if c["expires_at"] > time.time() else "expired"
