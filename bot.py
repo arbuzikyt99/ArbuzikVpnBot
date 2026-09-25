@@ -9,6 +9,7 @@ Mini App: miniapp.html + встроенный веб-сервер + туннел
 Запуск: start.bat (или `venv\\Scripts\\python.exe bot.py`).
 """
 import asyncio
+import base64
 import hashlib
 import hmac
 import html
@@ -61,6 +62,14 @@ INCY_SUFFIX = "?format=xray"  # параметр для приложения Inc
 CRYPTOBOT_TOKEN = os.environ.get(
     "CRYPTOBOT_TOKEN", "636063:AAQXvXF4uJsA5nlJDlNZ1XGD3bJ6wdH8I2z")
 CRYPTOBOT_FIAT = "RUB"  # выставлять счёт в рублях
+
+# Сохранение базы на GitHub (приватный репозиторий), чтобы данные не
+# терялись при деплое. Токен передаётся только через переменные окружения.
+GH_TOKEN = os.environ.get("GITHUB_DB_TOKEN", "")
+GH_REPO = os.environ.get("GITHUB_DB_REPO", "arbuzikyt99/arbuzikvpnbot-db")
+
+# Бесплатная подписка: сколько раз можно получить
+TRIAL_LIMIT = 2
 
 # Бесплатная (пробная) подписка
 TRIAL_DAYS = 3
@@ -254,11 +263,17 @@ def init_db() -> None:
                 username TEXT DEFAULT '',
                 client_name TEXT,
                 trial_taken INTEGER DEFAULT 0,
+                trial_count INTEGER DEFAULT 0,
                 created_at INTEGER,
                 notified_3d INTEGER DEFAULT 0,
                 notified_expired INTEGER DEFAULT 0
             )
         """)
+        ucols = [r[1] for r in c.execute("PRAGMA table_info(users)").fetchall()]
+        if "trial_count" not in ucols:
+            c.execute("ALTER TABLE users ADD COLUMN trial_count INTEGER DEFAULT 0")
+            # миграция: учитываем ранее выданные пробные
+            c.execute("UPDATE users SET trial_count = 1 WHERE trial_taken = 1")
         c.execute("""
             CREATE TABLE IF NOT EXISTS payments(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -302,7 +317,8 @@ def set_client(tg_id: int, client_name: str) -> None:
 
 def take_trial(tg_id: int) -> None:
     with conn() as c:
-        c.execute("UPDATE users SET trial_taken = 1 WHERE tg_id = ?", (tg_id,))
+        c.execute("UPDATE users SET trial_taken = 1, trial_count = trial_count + 1 "
+                  "WHERE tg_id = ?", (tg_id,))
 
 
 def set_notify_flags(tg_id: int, notified_3d: int | None = None,
@@ -567,6 +583,7 @@ async def fulfill_payment(p) -> None:
     devices = p["devices"] or PAID_DEVICES or 0
     client = await grant_days(p["tg_id"], p["days"], PAID_GB, devices)
     set_payment_status(p["id"], "paid")
+    backup_now()
     method = "CryptoBot 🪙" if p["method"] == "crypto" else "ручная оплата"
     if BOT:
         try:
@@ -826,6 +843,132 @@ def start_web_server(port: int) -> None:
 
 
 # ============================================================
+#          СОХРАНЕНИЕ БАЗЫ НА GITHUB (приватный репо)
+# ============================================================
+
+class GithubDB:
+    """Бэкап bot.db в приватный репозиторий через GitHub Contents API.
+
+    Файловая система Render сбрасывается при каждом деплое — благодаря
+    этому база пользователей и оплат переживает перезапуски.
+    """
+
+    API = "https://api.github.com"
+
+    def __init__(self, token: str, repo: str, path: str):
+        self.token = token
+        self.repo = repo
+        self.path = path          # путь к bot.db на диске
+        self.remote_path = "bot.db"
+        self._sha: str | None = None
+        self._last_hash = 0
+
+    def _headers(self) -> dict:
+        return {"Authorization": f"Bearer {self.token}",
+                "Accept": "application/vnd.github+json"}
+
+    def download(self) -> bool:
+        """Скачать последнюю базу из репо (если есть) в локальный файл."""
+        if not self.token:
+            return False
+        try:
+            with httpx.Client(timeout=30) as c:
+                r = c.get(f"{self.API}/repos/{self.repo}/contents/{self.remote_path}",
+                          headers=self._headers())
+            if r.status_code == 200:
+                data = r.json()
+                self._sha = data["sha"]
+                content = base64.b64decode(data["content"])
+                with open(self.path, "wb") as f:
+                    f.write(content)
+                log.info("База восстановлена из GitHub (%d байт)", len(content))
+                return True
+            if r.status_code == 404:
+                log.info("В репозитории ещё нет базы — начинаем с чистой")
+                return False
+            log.error("GitHub download: %s %s", r.status_code, r.text[:200])
+        except Exception as e:
+            log.error("GitHub download: %s", e)
+        return False
+
+    def upload(self, force: bool = False) -> None:
+        """Залить базу в репо, если она изменилась с прошлой загрузки."""
+        if not self.token:
+            return
+        try:
+            with open(self.path, "rb") as f:
+                content = f.read()
+            h = hash(content)
+            if h == self._last_hash and not force:
+                return
+            body: dict = {
+                "message": f"db backup {time.strftime('%Y-%m-%d %H:%M')}",
+                "content": base64.b64encode(content).decode(),
+            }
+            if self._sha:
+                body["sha"] = self._sha
+            with httpx.Client(timeout=30) as c:
+                r = c.put(f"{self.API}/repos/{self.repo}/contents/{self.remote_path}",
+                          headers=self._headers(), json=body)
+            if r.status_code in (200, 201):
+                data = r.json()
+                self._sha = data["content"]["sha"]
+                self._last_hash = h
+                log.info("База сохранена на GitHub (%d байт)", len(content))
+            else:
+                log.error("GitHub upload: %s %s", r.status_code, r.text[:200])
+        except Exception as e:
+            log.error("GitHub upload: %s", e)
+
+    def loop(self, interval: int = 300):
+        """Раз в interval секунд сохраняет базу, если она менялась."""
+        while True:
+            time.sleep(interval)
+            self.upload()
+
+
+def backup_now() -> None:
+    if GH_TOKEN:
+        try:
+            GithubDB(GH_TOKEN, GH_REPO, DB_PATH).upload(force=True)
+        except Exception as e:
+            log.error("backup_now: %s", e)
+
+
+async def rebuild_users_from_panel():
+    """Восстановить привязку пользователей к клиентам панели.
+
+    Клиенты бота называются tg<tg_id> — если база была потеряна,
+    восстанавливаем соответствие по списку клиентов панели.
+    """
+    try:
+        data = await api._request("GET", "/clients")
+        clients = data.get("clients") or []
+    except PanelError as e:
+        log.warning("rebuild: панель недоступна (%s)", e)
+        return 0
+    n = 0
+    for cl in clients:
+        name = cl.get("name", "")
+        if name.startswith("tg") and name[2:].isdigit():
+            tg_id = int(name[2:])
+            with conn() as c:
+                row = c.execute("SELECT client_name FROM users WHERE tg_id = ?",
+                                (tg_id,)).fetchone()
+                if row and row["client_name"] == name:
+                    continue
+                c.execute("""
+                    INSERT INTO users(tg_id, client_name, created_at)
+                    VALUES(?, ?, ?)
+                    ON CONFLICT(tg_id) DO UPDATE SET client_name = excluded.client_name
+                """, (tg_id, name, int(time.time())))
+            n += 1
+    if n:
+        log.info("Восстановлено привязок из панели: %d", n)
+    return n
+
+
+# ============================================================
 #                 ТУННЕЛЬ cloudflared (HTTPS)
 # ============================================================
 
@@ -969,12 +1112,14 @@ async def free_trial(message: Message):
     tg_id = message.from_user.id
     upsert_user(tg_id, message.from_user.username)
     user = get_user(tg_id)
-    if user["trial_taken"]:
+    if user["trial_count"] >= TRIAL_LIMIT:
         await message.answer(
-            "🎁 Бесплатная подписка выдаётся один раз.\n"
-            "Хотите продолжить — нажмите «💳 Купить подписку», это всего от 85 ₽ 😉"
+            f"🎁 Бесплатная подписка выдаётся максимум {TRIAL_LIMIT} раза — "
+            f"вы уже использовали все.\n"
+            "Продлить: «💳 Купить подписку», от 85 ₽ 😉"
         )
         return
+    left = TRIAL_LIMIT - user["trial_count"]
     try:
         client = await ensure_client(tg_id, TRIAL_DAYS, TRIAL_GB, TRIAL_DEVICES)
     except PanelError as e:
@@ -982,8 +1127,10 @@ async def free_trial(message: Message):
         await message.answer("⚠️ Не получилось создать подписку. Попробуйте позже или напишите в поддержку.")
         return
     take_trial(tg_id)
+    backup_now()
+    remain_txt = f" (осталось бесплатных: {left - 1})" if left - 1 else " (это была последняя бесплатная)"
     await message.answer(
-        f"🎉 <b>Бесплатная подписка активирована!</b>\n\n"
+        f"🎉 <b>Бесплатная подписка активирована!</b>{remain_txt}\n\n"
         f"Дней: <b>{TRIAL_DAYS}</b> · Трафик: <b>{TRIAL_GB} ГБ</b>\n\n"
         f"1) Установите приложение Happ или Incy (раздел «📱 Приложения»)\n"
         f"2) Добавьте подписку по ссылке:\n<code>{esc(sub_link(client['uuid']))}</code>\n\n"
@@ -1429,6 +1576,9 @@ async def expiry_checker(bot: Bot):
 
 async def main():
     global BOT, LOOP, MINIAPP_URL, SUB_BASE
+    # база: сначала восстановить из GitHub, потом открывать
+    if GH_TOKEN:
+        GithubDB(GH_TOKEN, GH_REPO, DB_PATH).download()
     init_db()
     BOT = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     LOOP = asyncio.get_running_loop()
@@ -1442,6 +1592,11 @@ async def main():
         if not SUB_BASE or "sslip.io" in SUB_BASE:
             SUB_BASE = ext + "/sub/"
             log.info("SUB_BASE (Render): %s", SUB_BASE)
+
+    # кто-то мог получить подписку, пока бот был выключен — восстанавливаем
+    restored = await rebuild_users_from_panel()
+    if restored:
+        backup_now()
 
     # Mini App: веб-сервер; адрес — стабильный на Render, туннель — локально
     start_web_server(MINIAPP_PORT)
@@ -1460,6 +1615,9 @@ async def main():
     log.info("Бот запущен: @%s", me.username)
     if on_render and MINIAPP_URL:
         await apply_menu_button()  # стабильный URL — ставим кнопку сразу
+    if GH_TOKEN:
+        threading.Thread(target=GithubDB(GH_TOKEN, GH_REPO, DB_PATH).loop,
+                         daemon=True, name="db-backup").start()
     tasks = [asyncio.create_task(crypto_checker()),
              asyncio.create_task(expiry_checker(BOT))]
     try:
@@ -1467,6 +1625,7 @@ async def main():
     finally:
         for t in tasks:
             t.cancel()
+        backup_now()
 
 
 if __name__ == "__main__":
