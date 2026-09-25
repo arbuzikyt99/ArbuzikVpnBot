@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="ru"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Арбузик VPN</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{--bg:#14101a;--card:#1f1828;--acc:#e5527a;--acc2:#7ed957;--txt:#f3eef7;--dim:#a99bb5}
+*{margin:0;padding:0;box-sizing:border-box;font-family:-apple-system,'Segoe UI',Roboto,sans-serif}
+body{background:var(--bg);color:var(--txt);min-height:100vh;padding:16px 14px 40px}
+.wrap{max-width:480px;margin:0 auto}
+h1{font-size:22px;text-align:center;margin:10px 0 4px}
+.sub{text-align:center;color:var(--dim);font-size:13px;margin-bottom:18px}
+.card{background:var(--card);border-radius:16px;padding:16px;margin-bottom:12px;box-shadow:0 4px 14px rgba(0,0,0,.35)}
+.row{display:flex;justify-content:space-between;padding:7px 0;font-size:14px}
+.dim{color:var(--dim)}
+.badge{display:inline-block;padding:2px 10px;border-radius:99px;font-size:12px;font-weight:600}
+.b-ok{background:rgba(126,217,87,.15);color:var(--acc2)}
+.b-warn{background:rgba(255,190,60,.15);color:#ffbe3c}
+.b-off{background:rgba(255,90,90,.15);color:#ff5a5a}
+h2{font-size:15px;margin:4px 0 10px}
+.tariff{display:flex;align-items:center;justify-content:space-between;background:#171221;border-radius:14px;padding:14px;margin-bottom:10px}
+.tariff .nm{font-weight:600;font-size:15px}
+.tariff .inf{color:var(--dim);font-size:12px;margin-top:3px}
+button{border:none;border-radius:12px;padding:10px 16px;font-size:14px;font-weight:600;cursor:pointer}
+.buy{background:linear-gradient(135deg,#e5527a,#ff7a9e);color:#fff;min-width:86px}
+.buy:disabled{opacity:.5}
+.btn2{background:#2c2340;color:var(--txt);width:100%;margin-top:6px}
+.copy{background:#2c2340;color:var(--txt);padding:8px 12px;font-size:13px}
+.mono{font-size:11px;color:var(--dim);word-break:break-all;margin-top:8px;font-family:monospace}
+.ok-msg{text-align:center;color:var(--acc2);padding:8px 0 0;display:none;font-size:13px}
+.center{text-align:center}
+#loader{text-align:center;color:var(--dim);padding:40px 0}
+</style></head><body>
+<div class="wrap">
+  <h1>🍉 Арбузик VPN</h1>
+  <div class="sub">быстрый и безопасный VPN</div>
+  <div id="loader">Загрузка…</div>
+  <div id="app" style="display:none">
+
+    <div class="card" id="statusCard"></div>
+
+    <div class="card">
+      <h2>💳 Тарифы</h2>
+      <div id="tariffs"></div>
+      <div class="mono">Оплата через CryptoBot — криптовалютой. После оплаты подписка
+      активируется автоматически в течение минуты.</div>
+    </div>
+
+    <div class="card">
+      <h2>🔗 Мои ссылки</h2>
+      <div id="links"></div>
+      <button class="btn2" onclick="load()">🔄 Обновить</button>
+      <div class="ok-msg" id="copied">✅ Скопировано</div>
+    </div>
+
+    <div class="card center dim" style="font-size:12px">
+      Поддержка — бот @ArbuzikV_bot, раздел «💬 Поддержка»<br>
+      Приложения: Happ · Incy · v2tunes
+    </div>
+  </div>
+  <div id="noauth" style="display:none" class="card center">
+    Откройте это приложение через Telegram 🍉
+  </div>
+</div>
+<script>
+const tg = window.Telegram.WebApp;
+tg.expand();
+try { tg.setHeaderColor('#14101a'); tg.setBackgroundColor('#14101a'); } catch(e) {}
+
+const F = ts => new Date(ts*1000).toLocaleString('ru-RU');
+
+async function api(path, params){
+  const q = new URLSearchParams(params||{});
+  q.set('init_data', tg.initData || '');
+  const r = await fetch(path + '?' + q.toString());
+  return r.json();
+}
+
+function badge(st, days){
+  if(st==='expired') return '<span class="badge b-off">истекла</span>';
+  if(days<=3) return '<span class="badge b-warn">заканчивается</span>';
+  return '<span class="badge b-ok">активна</span>';
+}
+
+async function load(){
+  try{
+    const me = await api('/api/me');
+    if(!me.ok){
+      document.getElementById('noauth').style.display='block';
+      document.getElementById('loader').style.display='none';
+      return;
+    }
+    document.getElementById('loader').style.display='none';
+    document.getElementById('app').style.display='block';
+
+    const s = me.sub;
+    let html = '<div class="row"><span class="dim">Статус</span>' +
+      (s ? badge(me.status, s.days) : '<span class="badge b-off">нет подписки</span>') + '</div>';
+    if(s){
+      html += '<div class="row"><span class="dim">Осталось</span><b>' + s.days + ' дн.</b></div>';
+      html += '<div class="row"><span class="dim">Действует до</span><b>' + F(s.until) + '</b></div>';
+      html += '<div class="row"><span class="dim">Трафик, ГБ</span><b>' + s.used + ' / ' + s.limit + '</b></div>';
+      html += '<div class="row"><span class="dim">Устройства</span><b>' + s.devices + '</b></div>';
+    } else {
+      html += '<div class="mono">Получите бесплатную подписку в боте: 🎁 «Бесплатная»</div>';
+    }
+    document.getElementById('statusCard').innerHTML = html;
+
+    let th = '';
+    (me.tariffs||[]).forEach((t,i)=>{
+      th += '<div class="tariff"><div><div class="nm">' + t.name + '</div>' +
+        '<div class="inf">' + t.days + ' дней · ' + t.devices + ' устройства · ' + t.price + ' ₽</div></div>' +
+        '<button class="buy" id="buy' + i + '" onclick="buy(' + i + ',' + t.price + ')">' + t.price + ' ₽</button></div>';
+    });
+    document.getElementById('tariffs').innerHTML = th;
+
+    let lh = '';
+    if(me.links){
+      lh += '<button class="copy" onclick="cp(\''+me.links.sub+'\')">🔗 Копировать ссылку подписки</button><div class="mono">'+me.links.sub+'</div>';
+      lh += '<div style="height:8px"></div>';
+      lh += '<button class="copy" onclick="cp(\''+me.links.incy+'\')">🍏 Копировать ссылку для Incy</button>';
+    } else {
+      lh = '<div class="mono">Ссылки появятся после получения подписки</div>';
+    }
+    document.getElementById('links').innerHTML = lh;
+  }catch(e){ console.error(e); }
+}
+
+async function buy(i, price){
+  const btn = document.getElementById('buy'+i);
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = '…';
+  try{
+    const r = await api('/api/invoice', {tariff: i});
+    if(r.ok && r.pay_url){
+      tg.openTelegramLink(r.pay_url);
+    } else {
+      tg.showAlert(r.error || 'Не удалось создать счёт');
+    }
+  }catch(e){ tg.showAlert('Ошибка сети'); }
+  btn.disabled = false; btn.textContent = old;
+}
+
+function cp(text){
+  if(navigator.clipboard) navigator.clipboard.writeText(text);
+  else { var i=document.createElement('input');document.body.appendChild(i);i.value=text;i.select();document.execCommand('copy');i.remove(); }
+  const c=document.getElementById('copied');
+  c.style.display='block';setTimeout(()=>c.style.display='none',1200);
+}
+load();
+</script></body></html>

@@ -1,0 +1,6 @@
+bot.db
+bot.log
+venv/
+__pycache__/
+*.pyc
+tunnel_test.log

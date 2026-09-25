@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: arbuzikvpnbot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.13.4"
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: PANEL_URL
+        sync: false
+      - key: PANEL_TOKEN
+        sync: false
+      - key: SUB_BASE
+        sync: false
+      - key: CRYPTOBOT_TOKEN
+        sync: false
