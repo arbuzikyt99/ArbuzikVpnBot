@@ -1096,6 +1096,15 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     upsert_user(message.from_user.id, message.from_user.username)
     await message.answer(WELCOME, reply_markup=main_kb())
+    # документы и информация — сразу каждому пользователю
+    await message.answer(
+        f"{BRAND}\n\n"
+        "ℹ️ <b>Информация о сервисе</b>\n\n"
+        "📜 Политика конфиденциальности и 📄 пользовательское соглашение — "
+        "по кнопкам ниже. Они же всегда доступны по команде /info "
+        "и в футере мини-приложения.",
+        reply_markup=info_kb(),
+    )
     if message.from_user.id == ADMIN_ID:
         await message.answer(
             "Вы администратор. Команды: /stats /user /give /paid /send /reply")
