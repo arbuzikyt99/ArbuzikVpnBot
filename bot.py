@@ -600,7 +600,7 @@ async def fulfill_payment(p) -> None:
     devices = p["devices"] or PAID_DEVICES or 0
     client = await grant_days(p["tg_id"], p["days"], PAID_GB, devices)
     set_payment_status(p["id"], "paid")
-    backup_now()
+    await backup_now()
     method = "CryptoBot 🪙" if p["method"] == "crypto" else "ручная оплата"
     if BOT:
         try:
@@ -913,7 +913,19 @@ class GithubDB:
             log.error("GitHub download: %s", e)
         return False
 
-    def upload(self, force: bool = False) -> None:
+    async def _remote_sha(self) -> str | None:
+        try:
+            async with httpx.AsyncClient(timeout=30) as c:
+                r = await c.get(
+                    f"{self.API}/repos/{self.repo}/contents/{self.remote_path}",
+                    headers=self._headers())
+            if r.status_code == 200:
+                return r.json()["sha"]
+        except Exception:
+            pass
+        return None
+
+    async def upload(self, force: bool = False) -> None:
         """Залить базу в репо, если она изменилась с прошлой загрузки."""
         if not self.token:
             return
@@ -923,15 +935,23 @@ class GithubDB:
             h = hash(content)
             if h == self._last_hash and not force:
                 return
-            body: dict = {
-                "message": f"db backup {time.strftime('%Y-%m-%d %H:%M')}",
-                "content": base64.b64encode(content).decode(),
-            }
-            if self._sha:
-                body["sha"] = self._sha
-            with httpx.Client(timeout=30) as c:
-                r = c.put(f"{self.API}/repos/{self.repo}/contents/{self.remote_path}",
-                          headers=self._headers(), json=body)
+            async with httpx.AsyncClient(timeout=30) as c:
+                body: dict = {
+                    "message": f"db backup {time.strftime('%Y-%m-%d %H:%M')}",
+                    "content": base64.b64encode(content).decode(),
+                }
+                if self._sha:
+                    body["sha"] = self._sha
+                r = await c.put(
+                    f"{self.API}/repos/{self.repo}/contents/{self.remote_path}",
+                    headers=self._headers(), json=body)
+                if r.status_code == 422:  # sha устарел — обновляем и повторяем
+                    self._sha = await self._remote_sha()
+                    if self._sha:
+                        body["sha"] = self._sha
+                        r = await c.put(
+                            f"{self.API}/repos/{self.repo}/contents/{self.remote_path}",
+                            headers=self._headers(), json=body)
             if r.status_code in (200, 201):
                 data = r.json()
                 self._sha = data["content"]["sha"]
@@ -942,19 +962,23 @@ class GithubDB:
         except Exception as e:
             log.error("GitHub upload: %s", e)
 
-    def loop(self, interval: int = 300):
-        """Раз в interval секунд сохраняет базу, если она менялась."""
-        while True:
-            time.sleep(interval)
-            self.upload()
-
-
-def backup_now() -> None:
+async def backup_now() -> None:
     if GH_TOKEN:
         try:
-            GithubDB(GH_TOKEN, GH_REPO, DB_PATH).upload(force=True)
+            await GithubDB(GH_TOKEN, GH_REPO, DB_PATH).upload(force=True)
         except Exception as e:
             log.error("backup_now: %s", e)
+
+
+async def backup_loop(interval: int = 300):
+    """Раз в interval секунд сохраняет базу, если она менялась."""
+    gh = GithubDB(GH_TOKEN, GH_REPO, DB_PATH)
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await gh.upload()
+        except Exception as e:
+            log.error("backup_loop: %s", e)
 
 
 async def rebuild_users_from_panel():
@@ -1167,7 +1191,7 @@ async def free_trial(message: Message):
         await message.answer("⚠️ Не получилось создать подписку. Попробуйте позже или напишите в поддержку.")
         return
     take_trial(tg_id)
-    backup_now()
+    await backup_now()
     remain_txt = f" (осталось бесплатных: {left - 1})" if left - 1 else " (это была последняя бесплатная)"
     await message.answer(
         f"🎉 <b>Бесплатная подписка активирована!</b>{remain_txt}\n\n"
@@ -1605,7 +1629,7 @@ async def webhook_guard(bot: Bot):
             if info.url:
                 log.warning("Обнаружен посторонний webhook: %s — удаляю", info.url)
                 await bot.delete_webhook(drop_pending_updates=False)
-                backup_now()
+                await backup_now()
         except Exception as e:
             log.error("webhook_guard: %s", e)
         await asyncio.sleep(300)
@@ -1694,7 +1718,7 @@ async def main():
     # кто-то мог получить подписку, пока бот был выключен — восстанавливаем
     restored = await rebuild_users_from_panel()
     if restored:
-        backup_now()
+        await backup_now()
 
     # Mini App: веб-сервер; адрес — стабильный на Render, туннель — локально
     start_web_server(MINIAPP_PORT)
@@ -1723,8 +1747,7 @@ async def main():
     if on_render and MINIAPP_URL:
         await apply_menu_button()  # стабильный URL — ставим кнопку сразу
     if GH_TOKEN:
-        threading.Thread(target=GithubDB(GH_TOKEN, GH_REPO, DB_PATH).loop,
-                         daemon=True, name="db-backup").start()
+        asyncio.create_task(backup_loop())
     tasks = [asyncio.create_task(crypto_checker()),
              asyncio.create_task(expiry_checker(BOT)),
              asyncio.create_task(webhook_guard(BOT))]
@@ -1733,7 +1756,7 @@ async def main():
     finally:
         for t in tasks:
             t.cancel()
-        backup_now()
+        await backup_now()
 
 
 if __name__ == "__main__":
