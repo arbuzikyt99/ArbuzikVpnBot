@@ -52,8 +52,9 @@ PANEL_TOKEN = os.environ.get(
     "PANEL_TOKEN",
     "2e03f56856784339b918d068f1759e03e7608d4365ba42cfa00aec940ec7244a")
 
-# Ссылка подписки (HTTPS — работает в Happ, v2tunes, Hiddify и т.д.)
-SUB_BASE = os.environ.get("SUB_BASE", "https://179-254-115-60.sslip.io/sub/")
+# Ссылка подписки — через HTTPS-адрес бота (прокси на панель, стабильно)
+# На Render хост подставится автоматически, если SUB_BASE не задан вручную
+SUB_BASE = os.environ.get("SUB_BASE", "")  # финальное значение — в main()
 INCY_SUFFIX = "?format=xray"  # параметр для приложения Incy
 
 # Оплата через CryptoBot (Crypto Pay API)
@@ -658,6 +659,11 @@ class MiniAppHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(parsed.query)
 
+        # публичный прокси подписки: /sub/<uuid>[?format=...] → панель
+        if parsed.path.startswith("/sub/"):
+            asyncio.run(self._sub_proxy(parsed))
+            return
+
         if parsed.path == "/":
             try:
                 with open(MINIAPP_HTML, encoding="utf-8") as f:
@@ -683,6 +689,41 @@ class MiniAppHandler(BaseHTTPRequestHandler):
             asyncio.run(self._admin(tg_id))
         else:
             self._json({"ok": False, "error": "not_found"}, 404)
+
+    async def _sub_proxy(self, parsed):
+        """Прокси подписки: панель отдаёт конфиги, мы — HTTPS с внешним адресом.
+
+        Пробрасываем User-Agent и x-hwid, чтобы панель корректно считала
+        устройства клиента.
+        """
+        uuid = parsed.path[len("/sub/"):].strip("/")
+        if not uuid:
+            self._json({"ok": False, "error": "not_found"}, 404)
+            return
+        url = PANEL_URL.rstrip("/") + "/sub/" + uuid
+        if parsed.query:
+            url += "?" + parsed.query
+        fwd = {}
+        for h in ("user-agent", "accept", "x-hwid", "x-device-id"):
+            v = self.headers.get(h)
+            if v:
+                fwd[h] = v
+        try:
+            async with httpx.AsyncClient(timeout=40, follow_redirects=True) as c:
+                r = await c.get(url, headers=fwd)
+        except (httpx.HTTPError, OSError) as e:
+            log.error("sub proxy: %s", e)
+            self._json({"ok": False, "error": "panel unreachable"}, 502)
+            return
+        body = r.content
+        self.send_response(r.status_code)
+        for h in ("content-type", "profile-title", "profile-update-interval",
+                  "subscription-userinfo", "announce"):
+            if h in r.headers:
+                self.send_header(h, r.headers[h])
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     async def _me(self, tg_id: int):
         tariffs = [{"name": n, "days": d, "devices": dv, "price": p}
@@ -1387,12 +1428,20 @@ async def expiry_checker(bot: Bot):
 # ============================================================
 
 async def main():
-    global BOT, LOOP, MINIAPP_URL
+    global BOT, LOOP, MINIAPP_URL, SUB_BASE
     init_db()
     BOT = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     LOOP = asyncio.get_running_loop()
 
     on_render = bool(os.environ.get("RENDER_EXTERNAL_URL"))
+
+    # Адрес подписки: на Render проксируем через свой HTTPS-адрес,
+    # если SUB_BASE не задан или указывает на нерабочий sslip-домен
+    if on_render:
+        ext = os.environ["RENDER_EXTERNAL_URL"].rstrip("/")
+        if not SUB_BASE or "sslip.io" in SUB_BASE:
+            SUB_BASE = ext + "/sub/"
+            log.info("SUB_BASE (Render): %s", SUB_BASE)
 
     # Mini App: веб-сервер; адрес — стабильный на Render, туннель — локально
     start_web_server(MINIAPP_PORT)
