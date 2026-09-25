@@ -190,6 +190,11 @@ class PanelAPI:
     async def delete(self, name: str) -> None:
         await self._request("DELETE", f"/clients/{name}")
 
+    async def reset_devices(self, name: str) -> dict:
+        """Сбросить устройства клиента (PATCH /clients/{name}/reset-devices)."""
+        data = await self._request("PATCH", f"/clients/{name}/reset-devices", {})
+        return data["client"]
+
 
 api = PanelAPI()
 
@@ -483,7 +488,7 @@ def main_kb() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="📋 Моя подписка"), KeyboardButton(text="🎁 Бесплатная")],
             [KeyboardButton(text="🔑 Мой ключ"), KeyboardButton(text="💳 Купить подписку")],
-            [KeyboardButton(text="🍉 Мини-приложение"), KeyboardButton(text="📱 Приложения")],
+            [KeyboardButton(text="🍉 Мини-приложение"), KeyboardButton(text="📱 Устройства")],
             [KeyboardButton(text="ℹ️ Инфо"), KeyboardButton(text="💬 Поддержка")],
         ],
     )
@@ -1349,10 +1354,184 @@ async def qr_key(cb: CallbackQuery):
     await cb.answer()
 
 
-@router.message(F.text == "📱 Приложения")
-async def apps_info(message: Message):
+# ---------- устройства ----------
+
+def _device_title(d: dict) -> str:
+    ua = (d.get("user_agent") or "").strip()
+    m = re.match(r"([A-Za-z0-9]+)\s*/?\s*([\d.]+)?\s*/?\s*(\w+)?", ua)
+    app = m.group(1).capitalize() if m and m.group(1) else "Устройство"
+    ver = f" {m.group(2)}" if m and m.group(2) else ""
+    plat = ""
+    low = ua.lower()
+    if "ios" in low or "darwin" in low or "iphone" in low:
+        plat = " · iOS 🍏"
+    elif "android" in low:
+        plat = " · Android 🤖"
+    elif "windows" in low:
+        plat = " · Windows 🖥"
+    elif "mac" in low:
+        plat = " · macOS 🍎"
+    return f"{app}{ver}{plat}"
+
+
+def _device_line(d: dict) -> str:
+    seen = int(time.time()) - int(d.get("last_seen") or 0)
+    if seen < 60:
+        when = "только что"
+    elif seen < 3600:
+        when = f"{seen // 60} мин назад"
+    elif seen < 86400:
+        when = f"{seen // 3600} ч назад"
+    else:
+        when = f"{seen // 86400} дн назад"
+    ip = d.get("ip") or "—"
+    return f"IP {esc(ip)} · был активен {when}"
+
+
+async def _devices_view(user) -> tuple[str, InlineKeyboardMarkup] | None:
+    """Список устройств клиента: (текст, клавиатура). None — нет подписки."""
+    client = await api.get(user["client_name"])
+    if not client:
+        return None
+    devices = client.get("devices") or []
+    limit = client.get("device_limit", 0)
+    lines = [
+        f"📱 <b>Устройства — {BRAND}</b>\n\n"
+        f"Подключено: <b>{len(devices)} / {limit}</b>\n\n"
+    ]
+    kb_rows = []
+    for i, d in enumerate(devices):
+        lines.append(f"<b>{i + 1}. {_device_title(d)}</b>\n{_device_line(d)}\n")
+        kb_rows.append([InlineKeyboardButton(
+            text=f"{i + 1}. {_device_title(d)}",
+            callback_data=f"devsel:{i}")])
+    if not devices:
+        lines.append("Пока ни одного устройства — обновите подписку в приложении.")
+    kb_rows.append([InlineKeyboardButton(text="📱 Приложения для VPN",
+                                         callback_data="appsinfo")])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+
+@router.message(F.text == "📱 Устройства")
+async def devices_list(message: Message):
+    user = get_user(message.from_user.id)
+    if not user or not user["client_name"]:
+        await message.answer(
+            "Сначала получите подписку: 🎁 «Бесплатная» или 💳 «Купить подписку».")
+        return
+    try:
+        view = await _devices_view(user)
+    except PanelError:
+        view = None
+    if view is None:
+        await message.answer("⚠️ Подписка не найдена на сервере. Напишите в поддержку.")
+        return
+    text, kb = view
     await message.answer(
-        "📱 <b>Приложения для {brand}</b>\n\n"
+        text + "\n\nНажмите на устройство, чтобы посмотреть подробности или удалить его.",
+        reply_markup=kb,
+    )
+
+
+@router.callback_query(F.data == "devs")
+async def devices_back(cb: CallbackQuery):
+    user = get_user(cb.from_user.id)
+    if not user or not user["client_name"]:
+        await cb.answer("Сначала получите подписку.", show_alert=True)
+        return
+    try:
+        view = await _devices_view(user)
+    except PanelError:
+        view = None
+    if view is None:
+        await cb.answer("Подписка не найдена.", show_alert=True)
+        return
+    text, kb = view
+    try:
+        await cb.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        await cb.message.answer(text, reply_markup=kb)
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("devsel:"))
+async def device_select(cb: CallbackQuery):
+    idx = int(cb.data.split(":")[1])
+    user = get_user(cb.from_user.id)
+    if not user or not user["client_name"]:
+        await cb.answer("Сначала получите подписку.", show_alert=True)
+        return
+    try:
+        client = await api.get(user["client_name"])
+    except PanelError:
+        client = None
+    devices = (client or {}).get("devices") or []
+    if not (0 <= idx < len(devices)):
+        await cb.answer("Список изменился, обновите.", show_alert=True)
+        return
+    d = devices[idx]
+    text = (
+        f"{_device_title(d)}\n\n"
+        f"{_device_line(d)}\n"
+        f"Метка: <code>{esc((d.get('label') or d.get('id') or '')[:20])}…</code>\n"
+        f"Подключено: {fmt_ts(int(d.get('first_seen') or 0))} (МСК)\n\n"
+        f"❗ После удаления устройство больше не сможет пользоваться "
+        f"подпиской, пока заново не добавит её в приложение."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🗑 Удалить это устройство",
+                              callback_data=f"devdel:{idx}")],
+        [InlineKeyboardButton(text="↩️ К списку устройств", callback_data="devs")],
+    ])
+    try:
+        await cb.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        await cb.message.answer(text, reply_markup=kb)
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("devdel:"))
+async def device_delete(cb: CallbackQuery):
+    idx = int(cb.data.split(":")[1])
+    user = get_user(cb.from_user.id)
+    if not user or not user["client_name"]:
+        await cb.answer("Сначала получите подписку.", show_alert=True)
+        return
+    try:
+        client = await api.get(user["client_name"])
+        devices = (client or {}).get("devices") or []
+        if not (0 <= idx < len(devices)):
+            await cb.answer("Список изменился, обновите.", show_alert=True)
+            return
+        d = devices[idx]
+        title = _device_title(d)
+        client = await api.reset_devices(user["client_name"])
+    except PanelError as e:
+        log.error("reset devices: %s", e)
+        await cb.answer("Не удалось удалить, попробуйте позже.", show_alert=True)
+        return
+    count = client.get("devices_count", 0)
+    await cb.message.edit_text(
+        f"✅ <b>Устройство удалено:</b> {title}\n\n"
+        f"Список устройств сброшен, сейчас подключено: <b>{count}</b>.\n\n"
+        f"• Остальные ваши устройства переподключатся сами при следующем "
+        f"обновлении подписки в приложении (обычно само, или потяните вниз).\n"
+        f"• Чтобы удалённое устройство точно потеряло доступ — удалите "
+        f"подписку из приложения на нём, иначе оно подключится заново.\n"
+        f"• Вернуть доступ: заново добавьте ключ/ссылку подписки в приложении "
+        f"(раздел «🔑 Мой ключ»).",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="↩️ К списку устройств", callback_data="devs")],
+        ]),
+    )
+    await cb.answer("Устройство удалено")
+
+
+# ---------- приложения ----------
+
+def apps_text() -> str:
+    return (
+        f"📱 <b>Приложения для {BRAND}</b>\n\n"
         "<b>Happ</b> (Windows, Android, iOS) — рекомендуем 👍\n"
         "Сайт: happ.su\n\n"
         "<b>Incy</b> (iOS, Android, TV) — новый, быстрый\n"
@@ -1362,9 +1541,22 @@ async def apps_info(message: Message):
         "<b>Как подключиться:</b>\n"
         "1️⃣ Установите приложение\n"
         "2️⃣ Профиль → Добавить по ссылке → вставьте ссылку подписки (раздел «🔑 Мой ключ»)\n"
-        "3️⃣ В списке появится «{brand}» — выберите сервер 🇩🇪 или 🇪🇺 Автовыбор\n\n"
-        "Для Incy используйте ссылку с пометкой «для Incy».".replace("{brand}", BRAND)
+        f"3️⃣ В списке появится «{BRAND}» — выберите сервер 🇩🇪 или 🇪🇺 Автовыбор\n\n"
+        "Для Incy используйте ссылку с пометкой «для Incy».\n"
+        "💡 В мини-приложении есть кнопки, которые сами открывают "
+        "приложение и добавляют подписку."
     )
+
+
+@router.message(F.text == "📱 Приложения")
+async def apps_info(message: Message):
+    await message.answer(apps_text())
+
+
+@router.callback_query(F.data == "appsinfo")
+async def apps_info_cb(cb: CallbackQuery):
+    await cb.message.answer(apps_text())
+    await cb.answer()
 
 
 # ---------- информация (документы, тарифы, поддержка) ----------

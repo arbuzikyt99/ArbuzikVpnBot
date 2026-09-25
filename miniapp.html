@@ -57,11 +57,17 @@ button{border:none;border-radius:12px;padding:10px 16px;font-size:14px;font-weig
 
     <div class="card">
       <h2>📱 Приложения для VPN</h2>
-      <div class="mono" style="margin:0 0 10px">Установите любое приложение и добавьте
-      свою ссылку подписки (кнопка «Копировать» ниже) — серверы появятся сами.</div>
+      <div class="mono" style="margin:0 0 10px">Установите приложение, затем нажмите кнопку в карточке
+      «Подключить в 1 клик» — или скопируйте ссылку подписки ниже.</div>
       <button class="btn2" onclick="tg.openLink('https://happ.su/downloads/')">📲 Happ — Windows, Android, iOS (рекомендую)</button>
       <button class="btn2" onclick="tg.openLink('https://github.com/INCY-DEV/incy-platforms/releases')">🍏 Incy — iOS, Android, TV</button>
       <button class="btn2" onclick="tg.openLink('https://play.google.com/store/apps/details?id=com.v2ray.ang')">🤖 v2rayNG — Android</button>
+    </div>
+
+    <div class="card" id="importCard" style="display:none">
+      <h2>🚀 Подключить в 1 клик</h2>
+      <div class="mono" style="margin:0 0 10px">Нажмите кнопку — откроется приложение и подписка добавится сама (приложение должно быть установлено).</div>
+      <div id="import"></div>
     </div>
 
     <div class="card">
@@ -170,6 +176,19 @@ async function load(){
     }
     document.getElementById('links').innerHTML = lh;
 
+    const ic = document.getElementById('importCard');
+    if(me.links){
+      window.SUBURL = me.links.sub;
+      document.getElementById('import').innerHTML =
+        '<button class="btn2" onclick="imp(\'happ\')">🍏 Happ — добавить подписку</button>' +
+        '<button class="btn2" onclick="imp(\'incy\')">🍏 Incy — добавить подписку</button>' +
+        '<button class="btn2" onclick="imp(\'v2rayng\')">🤖 v2rayNG — добавить подписку</button>' +
+        '<button class="btn2" onclick="imp(\'hiddify\')">🟣 Hiddify — добавить подписку</button>';
+      ic.style.display = 'block';
+    } else {
+      ic.style.display = 'none';
+    }
+
     if(me.is_admin){ loadAdmin(); } else { document.getElementById('admin').style.display='none'; }
   }catch(e){ console.error(e); }
 }
@@ -228,6 +247,19 @@ function cp(text){
   else { var i=document.createElement('input');document.body.appendChild(i);i.value=text;i.select();document.execCommand('copy');i.remove(); }
   const c=document.getElementById('copied');
   c.style.display='block';setTimeout(()=>c.style.display='none',1200);
+}
+
+function imp(app){
+  const s = window.SUBURL || '';
+  if(!s){ tg.showAlert('Сначала получите подписку'); return; }
+  const e = encodeURIComponent(s);
+  const map = {
+    happ:    'happ://add/' + s,
+    incy:    'incy://import/' + s,
+    v2rayng: 'v2rayng://install-sub?url=' + e,
+    hiddify: 'hiddify://install-sub?url=' + e + '#' + encodeURIComponent('Арбузик VPN'),
+  };
+  window.location.href = map[app];
 }
 load();
 </script></body></html>
