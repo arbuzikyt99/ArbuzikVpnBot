@@ -1143,9 +1143,6 @@ async def cmd_start(message: Message, state: FSMContext):
         "и в футере мини-приложения.",
         reply_markup=info_kb(),
     )
-    if message.from_user.id == ADMIN_ID:
-        await message.answer(
-            "Вы администратор. Команды: /stats /user /give /paid /send /reply")
 
 
 @router.message(F.text == "📋 Моя подписка")
@@ -1457,46 +1454,6 @@ class AdminFilter(BaseFilter):
 
 admin_router = Router()
 admin_router.message.filter(AdminFilter())
-
-
-@admin_router.message(Command("stats"))
-async def admin_stats(message: Message):
-    us = users_stats()
-    ps = payments_stats()
-    active = expired = 0
-    for row in all_users_with_client():
-        try:
-            c = await api.get(row["client_name"])
-        except PanelError:
-            continue
-        if not c:
-            continue
-        if c["expires_at"] > time.time():
-            active += 1
-        else:
-            expired += 1
-    with conn() as c2:
-        crypto = c2.execute(
-            "SELECT COUNT(*) n, COALESCE(SUM(amount),0) s FROM payments "
-            "WHERE status='paid' AND method='crypto'").fetchone()
-        card = c2.execute(
-            "SELECT COUNT(*) n, COALESCE(SUM(amount),0) s FROM payments "
-            "WHERE status='paid' AND method='card'").fetchone()
-    await message.answer(
-        f"📊 <b>Статистика {BRAND}</b>\n\n"
-        f"👤 Пользователей в боте: <b>{us['total']}</b>\n"
-        f"   · новых за сутки: {us['new_today']}\n"
-        f"   · новых за 7 дней: {us['new_7d']}\n"
-        f"🎁 Пробных получено: <b>{us['trials']}</b>\n"
-        f"🔑 С подпиской: <b>{us['with_sub']}</b>\n"
-        f"   · активных: <b>{active}</b>\n"
-        f"   · истёкших: <b>{expired}</b>\n\n"
-        f"💵 Купили подписку: <b>{ps['buyers']}</b> чел.\n"
-        f"💸 Выручка всего: <b>{ps['earned_total']:.0f} ₽</b>\n"
-        f"   · CryptoBot: {crypto['s']:.0f} ₽ ({crypto['n']} оплат)\n"
-        f"   · Картой: {card['s']:.0f} ₽ ({card['n']} оплат)\n"
-        f"💸 Выручка за 30 дней: <b>{ps['earned_30d']:.0f} ₽</b>"
-    )
 
 
 @admin_router.message(Command("user"))
