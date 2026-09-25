@@ -3,7 +3,7 @@
 Arbuzik VPN — Telegram-бот на aiogram 3 (всё в одном файле).
 
 Подключён к панели H1 VLESS (germany-d1.h1cloud.net).
-Оплата: CryptoBot (крипта, автоматически) и карта (перевод, подтверждает админ).
+Оплата: CryptoBot (крипта, автоматически).
 Mini App: miniapp.html + встроенный веб-сервер + туннель cloudflared.
 
 Запуск: start.bat (или `venv\\Scripts\\python.exe bot.py`).
@@ -76,16 +76,6 @@ TARIFFS = [
     ("3 месяца", 90, 3, 340),
     ("6 месяцев", 180, 5, 500),
 ]
-
-# Как оплачивать картой (впишите свои реквизиты!)
-PAYMENT_INFO = (
-    "💳 <b>Оплата переводом:</b>\n"
-    "Карта: <code>0000 0000 0000 0000</code> (Иван И.)\n\n"
-    "В комментарии к переводу укажите свой ID: <code>{user_id}</code>\n"
-    "Сумма: <b>{amount} ₽</b>\n\n"
-    "После оплаты нажмите «✅ Я оплатил» — администратор подтвердит, "
-    "и подписка активируется автоматически."
-)
 
 # Mini App
 MINIAPP_PORT = int(os.environ.get("PORT", "8080"))   # Render задаёт PORT сам
@@ -510,31 +500,9 @@ def tariffs_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def pay_method_kb(tariff_idx: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🪙 Оплатить криптой (CryptoBot)",
-                              callback_data=f"cbuy:{tariff_idx}")],
-        [InlineKeyboardButton(text="💳 Оплатить картой (перевод)",
-                              callback_data=f"kbuy:{tariff_idx}")],
-    ])
-
-
 def pay_url_kb(pay_url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🪙 Перейти к оплате в CryptoBot", url=pay_url)],
-    ])
-
-
-def paid_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Я оплатил", callback_data="i_paid")],
-    ])
-
-
-def admin_confirm_kb(payment_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Подтвердить оплату", callback_data=f"payok:{payment_id}"),
-         InlineKeyboardButton(text="❌ Отклонить", callback_data=f"payno:{payment_id}")],
     ])
 
 
@@ -598,7 +566,7 @@ async def fulfill_payment(p) -> None:
     devices = p["devices"] or PAID_DEVICES or 0
     client = await grant_days(p["tg_id"], p["days"], PAID_GB, devices)
     set_payment_status(p["id"], "paid")
-    method = "CryptoBot 🪙" if p["method"] == "crypto" else "карта 💳"
+    method = "CryptoBot 🪙" if p["method"] == "crypto" else "ручная оплата"
     if BOT:
         try:
             await BOT.send_message(
@@ -1040,25 +1008,14 @@ async def buy(message: Message):
     for name, days, devices, price in TARIFFS:
         lines.append(f"▫️ <b>{name}</b> — {price} ₽ ({days} дн., {devices} устр.)")
     lines.append(f"\nТрафик: <b>{PAID_GB} ГБ</b>")
-    lines.append("Оплата: 🪙 крипта (автоматически) или 💳 карта (перевод)")
+    lines.append("Оплата: 🪙 криптовалюта через CryptoBot (автоматически)")
     lines.append("\nВыберите тариф 👇")
     await message.answer("\n".join(lines), reply_markup=tariffs_kb())
 
 
 @router.callback_query(F.data.startswith("tariff:"))
 async def tariff_chosen(cb: CallbackQuery):
-    idx = int(cb.data.split(":")[1])
-    name, days, devices, price = TARIFFS[idx]
-    await cb.message.answer(
-        f"Тариф: <b>{name}</b> — {price} ₽ ({days} дн., {devices} устр.)\n\n"
-        f"Выберите способ оплаты:",
-        reply_markup=pay_method_kb(idx),
-    )
-    await cb.answer()
-
-
-@router.callback_query(F.data.startswith("cbuy:"))
-async def crypto_buy(cb: CallbackQuery):
+    """Выбор тарифа → сразу создаём счёт в CryptoBot."""
     idx = int(cb.data.split(":")[1])
     name, days, devices, price = TARIFFS[idx]
     if has_pending_payment(cb.from_user.id):
@@ -1075,98 +1032,12 @@ async def crypto_buy(cb: CallbackQuery):
                 method="crypto", invoice_id=inv["invoice_id"])
     await cb.message.answer(
         f"🪙 <b>Счёт создан в CryptoBot</b>\n\n"
-        f"Тариф: {name} — {price} ₽\n"
+        f"Тариф: {name} — {price} ₽ ({days} дн., {devices} устр.)\n"
         f"Счёт действует 1 час. После оплаты подписка активируется "
         f"автоматически в течение ~1 минуты.",
         reply_markup=pay_url_kb(inv["pay_url"]),
     )
     await cb.answer()
-
-
-@router.callback_query(F.data.startswith("kbuy:"))
-async def card_buy(cb: CallbackQuery):
-    idx = int(cb.data.split(":")[1])
-    name, days, devices, price = TARIFFS[idx]
-    await cb.message.answer(
-        PAYMENT_INFO.format(user_id=cb.from_user.id, amount=price)
-        + f"\n\nТариф: <b>{name}</b> ({days} дн., {devices} устр.)",
-        reply_markup=paid_kb(),
-    )
-    await cb.answer()
-
-
-@router.callback_query(F.data == "i_paid")
-async def i_paid(cb: CallbackQuery):
-    if has_pending_payment(cb.from_user.id):
-        await cb.answer("Заявка уже отправлена, ждите подтверждения ⏳", show_alert=True)
-        return
-    price, days, devices = TARIFFS[1][3], TARIFFS[1][1], TARIFFS[1][2]
-    msg_text = cb.message.text or cb.message.caption or ""
-    for n, d, dv, p in TARIFFS:
-        if f"{p} ₽" in msg_text:
-            price, days, devices = p, d, dv
-            break
-    pid = add_payment(cb.from_user.id, price, days, devices, method="card")
-    user = get_user(cb.from_user.id)
-    uname = esc("@" + user["username"]) if user and user["username"] else "без username"
-    await cb.bot.send_message(
-        ADMIN_ID,
-        f"💸 <b>Заявка на оплату #{pid} (карта)</b>\n\n"
-        f"Пользователь: {uname} (ID <code>{cb.from_user.id}</code>)\n"
-        f"Тариф: <b>{days} дн. — {price} ₽</b>",
-        reply_markup=admin_confirm_kb(pid),
-    )
-    await cb.answer("✅ Заявка отправлена администратору!", show_alert=True)
-    await cb.message.answer(
-        "✅ Заявка отправлена! После подтверждения оплаты подписка активируется автоматически.\n"
-        "Обычно это занимает несколько минут."
-    )
-
-
-@router.callback_query(F.data.startswith("payok:"))
-async def pay_ok(cb: CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Только для администратора.", show_alert=True)
-        return
-    pid = int(cb.data.split(":")[1])
-    p = get_payment(pid)
-    if not p or p["status"] != "pending":
-        await cb.answer("Заявка уже обработана.", show_alert=True)
-        return
-    try:
-        await fulfill_payment(p)
-    except PanelError as e:
-        log.error("grant failed: %s", e)
-        await cb.answer("Ошибка панели! Подписка не выдана.", show_alert=True)
-        return
-    await cb.message.edit_text(
-        cb.message.html_text + "\n\n✅ <b>ОПЛАТА ПОДТВЕРЖДЕНА</b>",
-        reply_markup=None,
-    )
-    await cb.answer("Готово, подписка выдана.")
-
-
-@router.callback_query(F.data.startswith("payno:"))
-async def pay_no(cb: CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Только для администратора.", show_alert=True)
-        return
-    pid = int(cb.data.split(":")[1])
-    p = get_payment(pid)
-    if not p or p["status"] != "pending":
-        await cb.answer("Заявка уже обработана.", show_alert=True)
-        return
-    set_payment_status(pid, "declined")
-    try:
-        await cb.bot.send_message(
-            p["tg_id"],
-            "❌ Заявка на оплату отклонена. Если это ошибка — напишите в 💬 Поддержку.",
-        )
-    except Exception:
-        pass
-    await cb.message.edit_text(cb.message.html_text + "\n\n❌ <b>ОТКЛОНЕНО</b>",
-                               reply_markup=None)
-    await cb.answer("Заявка отклонена.")
 
 
 @router.callback_query(F.data == "copysub")
