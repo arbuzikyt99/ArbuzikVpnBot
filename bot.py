@@ -396,6 +396,23 @@ def payments_stats() -> dict:
                 "buyers": buyers["n"]}
 
 
+def method_stats() -> dict:
+    with conn() as c:
+        out = {}
+        for m in ("crypto", "card"):
+            row = c.execute(
+                "SELECT COUNT(*) n, COALESCE(SUM(amount),0) s FROM payments "
+                "WHERE status='paid' AND method=?", (m,)).fetchone()
+            out[m] = {"count": row["n"], "sum": row["s"]}
+        return out
+
+
+def recent_payments(limit: int = 10):
+    with conn() as c:
+        return c.execute(
+            "SELECT * FROM payments ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+
+
 def users_stats() -> dict:
     now = int(time.time())
     with conn() as c:
@@ -682,6 +699,8 @@ class MiniAppHandler(BaseHTTPRequestHandler):
             asyncio.run(self._me(tg_id))
         elif parsed.path == "/api/invoice":
             asyncio.run(self._invoice(tg_id, int(q.get("tariff", ["0"])[0])))
+        elif parsed.path == "/api/admin":
+            asyncio.run(self._admin(tg_id))
         else:
             self._json({"ok": False, "error": "not_found"}, 404)
 
@@ -690,7 +709,8 @@ class MiniAppHandler(BaseHTTPRequestHandler):
                    for n, d, dv, p in TARIFFS]
         user = get_user(tg_id)
         resp: dict = {"ok": True, "tariffs": tariffs, "sub": None,
-                      "links": None, "status": "none"}
+                      "links": None, "status": "none",
+                      "is_admin": tg_id == ADMIN_ID}
         if user and user["client_name"]:
             try:
                 c = await api.get(user["client_name"])
@@ -711,6 +731,47 @@ class MiniAppHandler(BaseHTTPRequestHandler):
                     "incy": incy_link(c["uuid"]),
                 }
         self._json(resp)
+
+    async def _admin(self, tg_id: int):
+        """Статистика для админа. Доступ только у ADMIN_ID."""
+        if tg_id != ADMIN_ID:
+            self._json({"ok": False, "error": "forbidden"}, 403)
+            return
+        us = users_stats()
+        ps = payments_stats()
+        ms = method_stats()
+        active = expired = 0
+        for row in all_users_with_client():
+            try:
+                c = await api.get(row["client_name"])
+            except PanelError:
+                continue
+            if not c:
+                continue
+            if c["expires_at"] > time.time():
+                active += 1
+            else:
+                expired += 1
+        pays = [
+            {
+                "id": p["id"], "tg": p["tg_id"], "amount": p["amount"],
+                "days": p["days"], "method": p["method"], "status": p["status"],
+                "date": p["created_at"],
+            }
+            for p in recent_payments(10)
+        ]
+        self._json({
+            "ok": True,
+            "is_admin": True,
+            "users": us,
+            "subs": {"active": active, "expired": expired},
+            "money": {
+                "total": ps["earned_total"], "month": ps["earned_30d"],
+                "buyers": ps["buyers"], "paid_count": ps["paid_count"],
+                "crypto": ms["crypto"], "card": ms["card"],
+            },
+            "payments": pays,
+        })
 
     async def _invoice(self, tg_id: int, tariff_idx: int):
         if not (0 <= tariff_idx < len(TARIFFS)):

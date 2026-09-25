@@ -31,6 +31,19 @@ button{border:none;border-radius:12px;padding:10px 16px;font-size:14px;font-weig
 .ok-msg{text-align:center;color:var(--acc2);padding:8px 0 0;display:none;font-size:13px}
 .center{text-align:center}
 #loader{text-align:center;color:var(--dim);padding:40px 0}
+#admin{display:none}
+.agrid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.stat{background:#171221;border-radius:12px;padding:10px 12px}
+.stat .v{font-size:17px;font-weight:700}
+.stat .k{font-size:11px;color:var(--dim);margin-top:2px}
+.stat.acc{background:linear-gradient(135deg,rgba(229,82,122,.25),rgba(126,217,87,.15))}
+.ptable{width:100%;border-collapse:collapse;font-size:12px}
+.ptable td{padding:6px 4px;border-bottom:1px solid #2c2340}
+.ptable .dim{font-size:11px}
+.pbadge{padding:1px 8px;border-radius:99px;font-size:10px;font-weight:600}
+.p-ok{background:rgba(126,217,87,.15);color:var(--acc2)}
+.p-pend{background:rgba(255,190,60,.15);color:#ffbe3c}
+.p-no{background:rgba(255,90,90,.15);color:#ff5a5a}
 </style></head><body>
 <div class="wrap">
   <h1>🍉 Арбузик VPN</h1>
@@ -52,6 +65,15 @@ button{border:none;border-radius:12px;padding:10px 16px;font-size:14px;font-weig
       <div id="links"></div>
       <button class="btn2" onclick="load()">🔄 Обновить</button>
       <div class="ok-msg" id="copied">✅ Скопировано</div>
+    </div>
+
+    <div class="card" id="admin">
+      <h2>📊 Админ-панель</h2>
+      <div class="agrid" id="astats"></div>
+      <div style="height:12px"></div>
+      <h2>💸 Последние оплаты</h2>
+      <table class="ptable" id="apay"></table>
+      <button class="btn2" onclick="loadAdmin()">🔄 Обновить статистику</button>
     </div>
 
     <div class="card center dim" style="font-size:12px">
@@ -124,6 +146,41 @@ async function load(){
       lh = '<div class="mono">Ссылки появятся после получения подписки</div>';
     }
     document.getElementById('links').innerHTML = lh;
+
+    if(me.is_admin){ loadAdmin(); } else { document.getElementById('admin').style.display='none'; }
+  }catch(e){ console.error(e); }
+}
+
+async function loadAdmin(){
+  try{
+    const a = await api('/api/admin');
+    if(!a.ok){ document.getElementById('admin').style.display='none'; return; }
+    document.getElementById('admin').style.display='block';
+    const st = [
+      ['Пользователей', a.users.total],
+      ['Новых за 24ч', a.users.new_today],
+      ['Новых за 7 дней', a.users.new_7d],
+      ['Пробных выдано', a.users.trials],
+      ['Подписок активных', a.subs.active],
+      ['Подписок истекло', a.subs.expired],
+      ['Купили подписку', a.money.buyers + ' чел.'],
+      ['Оплат всего', a.money.paid_count],
+    ];
+    document.getElementById('astats').innerHTML =
+      '<div class="stat acc"><div class="v">' + a.money.total.toFixed(0) + ' ₽</div>' +
+      '<div class="k">Доход всего (за 30 дн: ' + a.money.month.toFixed(0) + ' ₽)</div></div>' +
+      '<div class="stat acc"><div class="v">🪙 ' + a.money.crypto.sum.toFixed(0) + ' ₽<br>💳 ' +
+      a.money.card.sum.toFixed(0) + ' ₽</div><div class="k">Крипта / Карты</div></div>' +
+      st.map(s => '<div class="stat"><div class="v">' + s[1] + '</div><div class="k">' + s[0] + '</div></div>').join('');
+
+    const MS = {paid:['оплачена','p-ok'],pending:['ждёт','p-pend'],declined:['отклонена','p-no']};
+    const F = ts => new Date(ts*1000).toLocaleDateString('ru-RU') + ' ' + new Date(ts*1000).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
+    document.getElementById('apay').innerHTML = a.payments.length
+      ? a.payments.map(p => '<tr><td><b>' + p.amount.toFixed(0) + ' ₽</b>' +
+          '<div class="dim">' + (p.method==='crypto'?'🪙 крипта':'💳 карта') + ' · ' + p.days + ' дн.</div></td>' +
+          '<td class="dim">ID ' + p.tg + '<div class="dim">' + F(p.date) + '</div></td>' +
+          '<td><span class="pbadge ' + (MS[p.status]||MS.pend)[1] + '">' + (MS[p.status]||['?'])[0] + '</span></td></tr>').join('')
+      : '<tr><td class="dim">Оплат пока нет</td></tr>';
   }catch(e){ console.error(e); }
 }
 
