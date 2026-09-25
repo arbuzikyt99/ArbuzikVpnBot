@@ -1592,6 +1592,25 @@ async def admin_reply(message: Message):
 #                    ФОНОВЫЕ ЗАДАЧИ
 # ============================================================
 
+async def webhook_guard(bot: Bot):
+    """Раз в 5 минут проверяет, не поставил ли кто-то чужой webhook.
+
+    Режим работы — long polling; посторонний webhook перехватывает все
+    сообщения (был случай с внешним конструктором ботов). Если обнаружен —
+    удаляем и логируем.
+    """
+    while True:
+        try:
+            info = await bot.get_webhook_info()
+            if info.url:
+                log.warning("Обнаружен посторонний webhook: %s — удаляю", info.url)
+                await bot.delete_webhook(drop_pending_updates=False)
+                backup_now()
+        except Exception as e:
+            log.error("webhook_guard: %s", e)
+        await asyncio.sleep(300)
+
+
 async def crypto_checker():
     """Раз в 20 секунд проверяет неоплаченные счета CryptoBot."""
     while True:
@@ -1707,7 +1726,8 @@ async def main():
         threading.Thread(target=GithubDB(GH_TOKEN, GH_REPO, DB_PATH).loop,
                          daemon=True, name="db-backup").start()
     tasks = [asyncio.create_task(crypto_checker()),
-             asyncio.create_task(expiry_checker(BOT))]
+             asyncio.create_task(expiry_checker(BOT)),
+             asyncio.create_task(webhook_guard(BOT))]
     try:
         await dp.start_polling(BOT)
     finally:
