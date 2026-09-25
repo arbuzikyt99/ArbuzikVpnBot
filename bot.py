@@ -711,6 +711,11 @@ class MiniAppHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
+        if parsed.path == "/ping":
+            # лёгкий эндпоинт для внешних пингеров (GitHub Actions и др.)
+            self._json({"ok": True, "pong": int(time.time())})
+            return
+
         tg_id = validate_init_data(q.get("init_data", [""])[0])
         if not tg_id:
             self._json({"ok": False, "error": "unauthorized"}, 401)
@@ -1063,15 +1068,24 @@ def tunnel_loop(port: int):
 
 
 def keepalive_loop(url: str):
-    """Рендер-режим: пингуем свой URL, чтобы бесплатный инстанс не засыпал."""
+    """Рендер-режим: пингуем свой URL каждые 5 минут (лимит сна — 15 минут).
+
+    Первый пинг — сразу после старта. Это удерживает инстанс активным;
+    если Render всё же усыпит сервис, внешний пингер (GitHub Actions)
+    разбудит его в течение нескольких минут.
+    """
     import urllib.request
+    target = url + "/ping"
     while True:
-        try:
-            urllib.request.urlopen(url + "/", timeout=30)
-            log.info("keepalive: %s — ок", url)
-        except Exception as e:
-            log.warning("keepalive: %s", e)
-        time.sleep(600)  # раз в 10 минут (лимит сна — 15 минут)
+        for _ in range(3):  # до 3 попыток подряд
+            try:
+                urllib.request.urlopen(target, timeout=30)
+                log.info("keepalive: ок")
+                break
+            except Exception as e:
+                log.warning("keepalive: %s", e)
+                time.sleep(20)
+        time.sleep(300)
 
 
 async def apply_menu_button():

@@ -1,0 +1,28 @@
+name: Keepalive
+# Пингует сервис бота каждые 5 минут, чтобы бесплатный инстанс Render
+# не засыпал после 15 минут неактивности. Публичный репозиторий —
+# Actions бесплатны и без лимитов.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping bot service
+        run: |
+          for i in 1 2 3; do
+            code=$(curl -s -o /dev/null -m 90 -w "%{http_code}" "https://arbuzikvpnbot.onrender.com/ping") || true
+            echo "attempt $i: $code"
+            [ "$code" = "200" ] && exit 0
+            sleep 20
+          done
+          echo "ping failed after retries (service may be deploying)"
+          exit 0
