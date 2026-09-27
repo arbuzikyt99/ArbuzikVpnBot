@@ -910,11 +910,18 @@ if (navigator.userAgent.indexOf('Android') !== -1) {{
             v = self.headers.get(h)
             if v:
                 fwd[h] = v
-        try:
-            async with httpx.AsyncClient(timeout=40, follow_redirects=True) as c:
-                r = await c.get(url, headers=fwd)
-        except (httpx.HTTPError, OSError) as e:
-            log.error("sub proxy: %s", e)
+        r = None
+        # панель периодически флапает — одна повторная попытка
+        for attempt in range(2):
+            try:
+                async with httpx.AsyncClient(timeout=40, follow_redirects=True) as c:
+                    r = await c.get(url, headers=fwd)
+                break
+            except (httpx.HTTPError, OSError) as e:
+                log.error("sub proxy (попытка %d): %s", attempt + 1, e)
+                if attempt == 0:
+                    await asyncio.sleep(1.5)
+        if r is None:
             self._json({"ok": False, "error": "panel unreachable"}, 502)
             return
         body = r.content
@@ -959,6 +966,8 @@ if (navigator.userAgent.indexOf('Android') !== -1) {{
                 c = await api.get(user["client_name"])
             except PanelError:
                 c = None
+                # панель флапает — не притворяемся, что подписки нет
+                resp["panel_down"] = True
             if c:
                 limit = c.get("traffic_limit_bytes", 0)
                 used_gb = c.get("traffic_used_bytes", 0) / 1024**3

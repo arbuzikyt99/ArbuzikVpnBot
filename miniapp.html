@@ -143,22 +143,28 @@ async function load(){
     document.getElementById('app').style.display='block';
 
     const s = me.sub;
-    let html = '<div class="row"><span class="dim">Статус</span>' +
-      (s ? badge(me.status, s.days) : '<span class="badge b-off">нет подписки</span>') + '</div>';
-    if(s){
-      html += '<div class="row"><span class="dim">Осталось</span><b>' + s.days + ' дн.</b></div>';
-      html += '<div class="row"><span class="dim">Действует до</span><b>' + F(s.until) + '</b></div>';
-      let tbar;
-      if(s.limit_gb){
-        const pct = Math.min(100, Math.round(s.used_gb / s.limit_gb * 100));
-        const col = pct > 80 ? '#ff5a5a' : (pct > 60 ? '#ffbe3c' : 'var(--acc2)');
-        tbar = '<div class="traffic-bar"><div class="traffic-fill" style="width:' + pct + '%;background:' + col + '"></div></div>';
-      }
-      html += '<div class="row"><span class="dim">Израсходовано</span><b>' + s.used + ' / ' + s.limit + ' ГБ</b></div>';
-      if(tbar) html += tbar;
-      html += '<div class="row"><span class="dim">Устройства</span><b>' + s.devices + '</b></div>';
+    let html;
+    if(me.panel_down){
+      html = '<div class="row"><span class="dim">Статус</span><span class="badge b-warn">панель недоступна</span></div>' +
+        '<div class="mono">⚠️ Сервер временно не отвечает — данные о трафике и днях появятся, когда он вернётся. Обнови мини-апп через пару минут.</div>';
     } else {
-      html += '<div class="mono">Получите бесплатную подписку в боте: 🎁 «Бесплатная»</div>';
+      html = '<div class="row"><span class="dim">Статус</span>' +
+        (s ? badge(me.status, s.days) : '<span class="badge b-off">нет подписки</span>') + '</div>';
+      if(s){
+        html += '<div class="row"><span class="dim">Осталось</span><b>' + s.days + ' дн.</b></div>';
+        html += '<div class="row"><span class="dim">Действует до</span><b>' + F(s.until) + '</b></div>';
+        let tbar;
+        if(s.limit_gb){
+          const pct = Math.min(100, Math.round(s.used_gb / s.limit_gb * 100));
+          const col = pct > 80 ? '#ff5a5a' : (pct > 60 ? '#ffbe3c' : 'var(--acc2)');
+          tbar = '<div class="traffic-bar"><div class="traffic-fill" style="width:' + pct + '%;background:' + col + '"></div></div>';
+        }
+        html += '<div class="row"><span class="dim">Израсходовано</span><b>' + s.used + ' / ' + s.limit + ' ГБ</b></div>';
+        if(tbar) html += tbar;
+        html += '<div class="row"><span class="dim">Устройства</span><b>' + s.devices + '</b></div>';
+      } else {
+        html += '<div class="mono">Получите бесплатную подписку в боте: 🎁 «Бесплатная»</div>';
+      }
     }
     document.getElementById('statusCard').innerHTML = html;
 
@@ -185,7 +191,13 @@ async function load(){
     if(window.OS) selOS(window.OS);
 
     if(me.is_admin){ loadAdmin(); } else { document.getElementById('admin').style.display='none'; }
-  }catch(e){ console.error(e); }
+  }catch(e){
+    console.error(e);
+    document.getElementById('loader').style.display='none';
+    document.getElementById('app').style.display='block';
+    document.getElementById('statusCard').innerHTML =
+      '<div class="mono">⚠️ Не удалось загрузить данные — проверь интернет и открой мини-апп заново.</div>';
+  }
 }
 
 async function loadAdmin(){
