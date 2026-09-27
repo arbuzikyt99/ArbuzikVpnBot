@@ -382,15 +382,6 @@ def set_payment_status(pid: int, status: str) -> None:
                   (status, int(time.time()), pid))
 
 
-def has_pending_payment(tg_id: int) -> bool:
-    with conn() as c:
-        row = c.execute(
-            "SELECT COUNT(*) AS n FROM payments WHERE tg_id = ? AND status = 'pending'",
-            (tg_id,),
-        ).fetchone()
-        return row["n"] > 0
-
-
 def pending_crypto_payments():
     with conn() as c:
         return c.execute(
@@ -845,10 +836,6 @@ class MiniAppHandler(BaseHTTPRequestHandler):
         if not (0 <= tariff_idx < len(TARIFFS)):
             self._json({"ok": False, "error": "Неверный тариф"}, 400)
             return
-        if has_pending_payment(tg_id):
-            self._json({"ok": False,
-                        "error": "У вас уже есть необработанная заявка."}, 400)
-            return
         name, days, devices, price = TARIFFS[tariff_idx]
         try:
             inv = await CryptoPay().create_invoice(
@@ -1252,29 +1239,26 @@ async def miniapp_menu(message: Message):
 
 @router.message(F.text == "💳 Купить подписку")
 async def buy(message: Message):
-    if has_pending_payment(message.from_user.id):
-        await message.answer(
-            "⏳ У вас уже есть необработанная заявка на оплату.\n"
-            "Если оплатили давно и ничего не пришло — напишите в 💬 Поддержку."
-        )
-        return
     lines = [f"{BRAND} — тарифы:", ""]
     for name, days, devices, price in TARIFFS:
         lines.append(f"▫️ <b>{name}</b> — {price} ₽ ({days} дн., {devices} устр.)")
     lines.append(f"\nТрафик: <b>{PAID_GB} ГБ</b>")
     lines.append("Оплата: 🪙 криптовалюта через CryptoBot (автоматически)")
+    lines.append("💡 Дни складываются: если подписка активна и вы купите ещё, "
+                 "дни нового тарифа добавятся к текущим.")
     lines.append("\nВыберите тариф 👇")
     await message.answer("\n".join(lines), reply_markup=tariffs_kb())
 
 
 @router.callback_query(F.data.startswith("tariff:"))
 async def tariff_chosen(cb: CallbackQuery):
-    """Выбор тарифа → сразу создаём счёт в CryptoBot."""
+    """Выбор тарифа → сразу создаём счёт в CryptoBot.
+
+    Повторные счета разрешены: каждый оплачивается отдельно,
+    оплаченные дни суммируются с текущей подпиской.
+    """
     idx = int(cb.data.split(":")[1])
     name, days, devices, price = TARIFFS[idx]
-    if has_pending_payment(cb.from_user.id):
-        await cb.answer("У вас уже есть необработанная заявка ⏳", show_alert=True)
-        return
     try:
         inv = await CryptoPay().create_invoice(
             price, f"Арбузик VPN — {name} ({days} дн.)", payload=f"tg{cb.from_user.id}")
@@ -1288,7 +1272,8 @@ async def tariff_chosen(cb: CallbackQuery):
         f"🪙 <b>Счёт создан в CryptoBot</b>\n\n"
         f"Тариф: {name} — {price} ₽ ({days} дн., {devices} устр.)\n"
         f"Счёт действует 1 час. После оплаты подписка активируется "
-        f"автоматически в течение ~1 минуты.",
+        f"автоматически в течение ~1 минуты.\n"
+        f"Если уже есть активная подписка — дни добавятся к ней.",
         reply_markup=pay_url_kb(inv["pay_url"]),
     )
     await cb.answer()
