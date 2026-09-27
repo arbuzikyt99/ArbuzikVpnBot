@@ -91,6 +91,9 @@ button{border:none;border-radius:12px;padding:10px 16px;font-size:14px;font-weig
       <div style="height:12px"></div>
       <h2>💸 Последние оплаты</h2>
       <table class="ptable" id="apay"></table>
+      <div style="height:12px"></div>
+      <h2>📊 Топ по трафику</h2>
+      <table class="ptable" id="atraffic"></table>
       <button class="btn2" onclick="loadAdmin()">🔄 Обновить статистику</button>
     </div>
 
@@ -214,6 +217,14 @@ async function loadAdmin(){
           '<td class="dim">ID ' + p.tg + '<div class="dim">' + F(p.date) + '</div></td>' +
           '<td><span class="pbadge ' + (MS[p.status]||MS.pend)[1] + '">' + (MS[p.status]||['?'])[0] + '</span></td></tr>').join('')
       : '<tr><td class="dim">Оплат пока нет</td></tr>';
+
+    const TT = a.top_traffic || [];
+    document.getElementById('atraffic').innerHTML = TT.length
+      ? TT.map(t => '<tr><td><b>' + (t.username ? '@'+t.username : 'ID '+t.tg) + '</b>' +
+          '<div class="dim">ID ' + t.tg + '</div></td>' +
+          '<td style="text-align:right"><b>' + t.used_gb.toFixed(2) + ' ГБ</b>' +
+          '<div class="dim">из ' + (t.limit_gb ? t.limit_gb + ' ГБ' : '∞') + '</div></td></tr>').join('')
+      : '<tr><td class="dim">Нет данных</td></tr>';
   }catch(e){ console.error(e); }
 }
 

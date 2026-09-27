@@ -986,6 +986,27 @@ if (navigator.userAgent.indexOf('Android') !== -1) {{
             }
             for p in recent_payments(10)
         ]
+        # топ пользователей по трафику (объём; адреса сайтов не видны —
+        # панель не отдаёт логи подключений Xray)
+        top = []
+        try:
+            st = await api._request("GET", "/stats")
+            for cl in st.get("clients", []):
+                name = cl.get("name", "")
+                if not (name.startswith("tg") and name[2:].isdigit()):
+                    continue
+                u = get_user(int(name[2:]))
+                top.append({
+                    "tg": int(name[2:]),
+                    "username": (u["username"] if u else "") or "",
+                    "used_gb": round(cl.get("stored_used_gb", 0), 2),
+                    "limit_gb": (round(cl["traffic_limit_bytes"] / 1024**3, 1)
+                                 if cl.get("traffic_limit_bytes") else None),
+                })
+            top.sort(key=lambda x: -x["used_gb"])
+            top = top[:10]
+        except PanelError as e:
+            log.warning("admin top traffic: %s", e)
         self._json({
             "ok": True,
             "is_admin": True,
@@ -997,6 +1018,7 @@ if (navigator.userAgent.indexOf('Android') !== -1) {{
                 "crypto": ms["crypto"], "card": ms["card"],
             },
             "payments": pays,
+            "top_traffic": top,
         })
 
     async def _invoice(self, tg_id: int, tariff_idx: int):
