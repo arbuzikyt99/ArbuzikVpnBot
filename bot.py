@@ -918,6 +918,26 @@ if (navigator.userAgent.indexOf('Android') !== -1) {{
             self._json({"ok": False, "error": "panel unreachable"}, 502)
             return
         body = r.content
+        # Конфиг не должен приносить свой DNS, иначе в настройках подписки
+        # (Incy и др.) появляется «DNS туннель»; без секции клиент подставит
+        # свой queryStrategy+hosts без утечек. Только xray-конфиги (outbound
+        # с "protocol"); sing-box ("type") не трогаем.
+        if "application/json" in r.headers.get("content-type", ""):
+            try:
+                cfg = json.loads(body)
+                items = cfg if isinstance(cfg, list) else [cfg]
+                changed = False
+                for el in items:
+                    if (isinstance(el, dict) and "dns" in el
+                            and any("protocol" in o for o in el.get("outbounds", [])
+                                    if isinstance(o, dict))):
+                        del el["dns"]
+                        changed = True
+                if changed:
+                    body = json.dumps(cfg, ensure_ascii=False,
+                                      separators=(",", ":")).encode()
+            except (ValueError, UnicodeDecodeError):
+                pass
         self.send_response(r.status_code)
         for h in ("content-type", "profile-title", "profile-update-interval",
                   "subscription-userinfo", "announce"):
