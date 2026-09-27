@@ -66,7 +66,8 @@ button{border:none;border-radius:12px;padding:10px 16px;font-size:14px;font-weig
 
     <div class="card" id="importCard" style="display:none">
       <h2>🚀 Подключить в 1 клик</h2>
-      <div class="mono" style="margin:0 0 10px">Нажмите кнопку — откроется приложение и подписка добавится сама (приложение должно быть установлено).</div>
+      <div class="mono" style="margin:0 0 10px">Приложение должно быть установлено. Откроется страница
+      в браузере — нажмите кнопку, и подписка добавится в приложение сама.</div>
       <div id="import"></div>
     </div>
 
@@ -253,14 +254,10 @@ function cp(text){
 function imp(app){
   const s = window.SUBURL || '';
   if(!s){ tg.showAlert('Сначала получите подписку'); return; }
-  const e = encodeURIComponent(s);
-  const map = {
-    happ:    'happ://add/' + s,
-    incy:    'incy://import/' + s,
-    v2rayng: 'v2rayng://install-sub?url=' + e,
-    hiddify: 'hiddify://install-sub?url=' + e + '#' + encodeURIComponent('Арбузик VPN'),
-  };
-  window.location.href = map[app];
+  // Telegram-вебвью блокирует happ:// и другие схемы, поэтому открываем
+  // промежуточную страницу в обычном браузере — она запустит приложение
+  const u = location.origin + '/import?app=' + app + '&url=' + encodeURIComponent(s);
+  tg.openLink(u);
 }
 load();
 </script></body></html>

@@ -712,6 +712,10 @@ class MiniAppHandler(BaseHTTPRequestHandler):
             self._json({"ok": True, "pong": int(time.time())})
             return
 
+        if parsed.path == "/import":
+            self._import_page(q)
+            return
+
         tg_id = validate_init_data(q.get("init_data", [""])[0])
         if not tg_id:
             self._json({"ok": False, "error": "unauthorized"}, 401)
@@ -724,6 +728,66 @@ class MiniAppHandler(BaseHTTPRequestHandler):
             asyncio.run(self._admin(tg_id))
         else:
             self._json({"ok": False, "error": "not_found"}, 404)
+
+    IMPORT_APPS = {
+        "happ": ("Happ", "happ://add/{raw}"),
+        "incy": ("Incy", "incy://import/{raw}"),
+        "v2rayng": ("v2rayNG", "v2rayng://install-sub?url={enc}"),
+        "hiddify": ("Hiddify", "hiddify://install-sub?url={enc}#Арбузик VPN"),
+    }
+
+    def _import_page(self, q):
+        """Промежуточная страница для импорта подписки в приложение.
+
+        Telegram-вебвью блокирует кастомные схемы (happ://, incy://…),
+        поэтому мини-апп открывает эту HTTPS-страницу в обычном браузере,
+        а она уже открывает приложение (плюс кнопка-дубль на случай,
+        если автоматический переход заблокирован — например, в Safari).
+        """
+        app = (q.get("app", [""])[0] or "").lower()
+        sub = q.get("url", [""])[0]
+        if app not in self.IMPORT_APPS or not sub.startswith("http"):
+            self._json({"ok": False, "error": "bad request"}, 400)
+            return
+        name, tpl = self.IMPORT_APPS[app]
+        scheme = tpl.format(raw=sub, enc=urllib.parse.quote(sub, safe=""))
+        scheme_esc = html.escape(scheme, quote=True)
+        sub_esc = html.escape(sub, quote=True)
+        body = f"""<!doctype html>
+<html lang="ru"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Арбузик VPN — {name}</title>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box;font-family:-apple-system,'Segoe UI',Roboto,sans-serif}}
+body{{background:#14101a;color:#f3eef7;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}}
+.card{{background:#1f1828;border-radius:16px;padding:24px;max-width:420px;width:100%;text-align:center;box-shadow:0 4px 14px rgba(0,0,0,.35)}}
+h2{{font-size:18px;margin-bottom:10px}}
+.btn{{display:block;background:linear-gradient(135deg,#e5527a,#ff7a9e);color:#fff;border-radius:12px;
+padding:14px;font-size:16px;font-weight:600;text-decoration:none;margin:14px 0}}
+.mono{{font-size:11px;color:#a99bb5;word-break:break-all;margin-top:12px;font-family:monospace}}
+.dim{{color:#a99bb5;font-size:13px}}
+</style></head><body>
+<div class="card">
+  <h2>🍉 Открываем {name}…</h2>
+  <div class="dim">Подписка «Арбузик VPN» добавится автоматически.</div>
+  <a class="btn" id="open" href="{scheme_esc}">Открыть в {name}</a>
+  <div class="dim">Не открылось? Установите {name}, затем нажмите кнопку ещё раз.</div>
+  <div class="mono">{sub_esc}</div>
+</div>
+<script>
+if (navigator.userAgent.indexOf('Android') !== -1) {{
+  setTimeout(function() {{ location.replace('{scheme_esc}') }}, 500);
+}}
+</script>
+</body></html>"""
+        data = body.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     async def _sub_proxy(self, parsed):
         """Прокси подписки: панель отдаёт конфиги, мы — HTTPS с внешним адресом.
