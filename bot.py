@@ -190,6 +190,10 @@ class PanelAPI:
     async def delete(self, name: str) -> None:
         await self._request("DELETE", f"/clients/{name}")
 
+    async def list_all(self) -> list[dict]:
+        data = await self._request("GET", "/clients")
+        return data["clients"] if isinstance(data, dict) and "clients" in data else data
+
     async def reset_devices(self, name: str) -> dict:
         """Сбросить устройства клиента (PATCH /clients/{name}/reset-devices)."""
         data = await self._request("PATCH", f"/clients/{name}/reset-devices", {})
@@ -309,6 +313,17 @@ def init_db() -> None:
                 last_seen INTEGER
             )
         """)
+        if "client_uuid" not in ucols:
+            c.execute("ALTER TABLE users ADD COLUMN client_uuid TEXT")
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS devices_seen(
+                uuid TEXT,
+                device_id TEXT,
+                first_seen INTEGER,
+                notified INTEGER DEFAULT 0,
+                PRIMARY KEY(uuid, device_id)
+            )
+        """)
         cols = [r[1] for r in c.execute("PRAGMA table_info(payments)").fetchall()]
         if "method" not in cols:
             c.execute("ALTER TABLE payments ADD COLUMN method TEXT DEFAULT 'card'")
@@ -334,6 +349,11 @@ def get_user(tg_id: int):
 def set_client(tg_id: int, client_name: str) -> None:
     with conn() as c:
         c.execute("UPDATE users SET client_name = ? WHERE tg_id = ?", (client_name, tg_id))
+
+
+def set_client_uuid(tg_id: int, uuid: str) -> None:
+    with conn() as c:
+        c.execute("UPDATE users SET client_uuid = ? WHERE tg_id = ?", (uuid, tg_id))
 
 
 def take_trial(tg_id: int) -> None:
@@ -536,6 +556,86 @@ def device_meta_for(d: dict) -> dict:
     return dict(row) if row else {}
 
 
+async def notify_new_device(uuid: str, hwid_raw: str, ua: str) -> None:
+    """Новое устройство подключилось к подписке — уведомить владельца и админа.
+
+    Устройство уже зарегистрировано панелью (ответ 200). Первый наблюдаемый
+    набор устройств после запуска фиксируется как базовая линия — без пушей.
+    """
+    try:
+        if not BOT or not uuid or not hwid_raw:
+            return
+        device_id = "hwid:" + hashlib.sha256(hwid_raw.encode()).hexdigest()
+        row = None
+        with conn() as c:
+            row = c.execute(
+                "SELECT tg_id, username, client_name FROM users WHERE client_uuid = ?",
+                (uuid,)).fetchone()
+        if row is None:
+            # догоняем привязку uuid → пользователь через список панели
+            for cl in await api.list_all():
+                if cl.get("uuid") == uuid:
+                    with conn() as c:
+                        u = c.execute("SELECT tg_id, username, client_name FROM users "
+                                      "WHERE client_name = ?", (cl["name"],)).fetchone()
+                    if u:
+                        with conn() as c:
+                            c.execute("UPDATE users SET client_uuid = ? WHERE client_name = ?",
+                                      (uuid, cl["name"]))
+                        row = u
+                    break
+        if row is None:
+            return
+        with conn() as c:
+            known = {r[0] for r in c.execute(
+                "SELECT device_id FROM devices_seen WHERE uuid = ?", (uuid,))}
+        client = await api.get(row["client_name"])
+        if not client:
+            return
+        devices = client.get("devices") or []
+        if not known:
+            with conn() as c:
+                for d in devices:
+                    c.execute("INSERT OR IGNORE INTO devices_seen(uuid, device_id, "
+                              "first_seen, notified) VALUES(?, ?, ?, 1)",
+                              (uuid, d.get("id") or "", int(d.get("first_seen") or 0)))
+            return
+        if device_id in known:
+            return
+        with conn() as c:
+            c.execute("INSERT OR IGNORE INTO devices_seen(uuid, device_id, first_seen, "
+                      "notified) VALUES(?, ?, ?, 0)", (uuid, device_id, int(time.time())))
+        meta = device_meta_for({"id": device_id})
+        model, os_ver = meta.get("model"), meta.get("os_ver")
+        if model and os_ver:
+            title = f"{model} · {os_ver}"
+        elif model or os_ver:
+            title = model or os_ver
+        else:
+            title = "Новое устройство"
+        n, lim = len(devices), client.get("device_limit", 0)
+        try:
+            await BOT.send_message(
+                row["tg_id"],
+                f"🆕 <b>К вашей подписке добавлено новое устройство</b>\n\n"
+                f"{esc(title)}\n"
+                f"Устройств: <b>{n} / {lim}</b>\n\n"
+                f"Если это были не вы — откройте бота → «📱 Устройства» "
+                f"и удалите лишнее.")
+        except Exception:
+            pass
+        if row["tg_id"] != ADMIN_ID:
+            try:
+                await BOT.send_message(
+                    ADMIN_ID,
+                    f"🆕 @{row['username'] or row['tg_id']}: новое устройство "
+                    f"{esc(title)} ({n}/{lim})")
+            except Exception:
+                pass
+    except Exception as e:
+        log.warning("notify_new_device: %s", e)
+
+
 def sub_link(uuid: str) -> str:
     return SUB_BASE + uuid
 
@@ -680,6 +780,7 @@ async def grant_days(tg_id: int, days: int, traffic_gb: int, device_limit: int) 
             else:
                 raise
         set_client(tg_id, name)
+        set_client_uuid(tg_id, client.get("uuid") or "")
         return client
     if client["expires_at"] < now:  # истекла — новая дата от текущего момента
         client = await api.extend(name, expires_at=now + days * 86400,
@@ -687,6 +788,7 @@ async def grant_days(tg_id: int, days: int, traffic_gb: int, device_limit: int) 
     else:                            # активна — добавляем дни
         client = await api.extend(name, days=days,
                                   traffic_gb=traffic_gb, device_limit=device_limit)
+    set_client_uuid(tg_id, client.get("uuid") or "")
     return client
 
 
@@ -945,6 +1047,10 @@ if (navigator.userAgent.indexOf('Android') !== -1) {{
                                       separators=(",", ":")).encode()
             except (ValueError, UnicodeDecodeError):
                 pass
+        # устройство зарегистрировано панелью (200) — уведомляем в фоне
+        if r.status_code == 200 and hwid_raw:
+            asyncio.create_task(notify_new_device(
+                uuid, hwid_raw, self.headers.get("user-agent", "")))
         self.send_response(r.status_code)
         for h in ("content-type", "profile-title", "profile-update-interval",
                   "subscription-userinfo", "announce"):
@@ -969,6 +1075,8 @@ if (navigator.userAgent.indexOf('Android') !== -1) {{
                 # панель флапает — не притворяемся, что подписки нет
                 resp["panel_down"] = True
             if c:
+                if c.get("uuid") and user["client_uuid"] != c["uuid"]:
+                    set_client_uuid(tg_id, c["uuid"])
                 limit = c.get("traffic_limit_bytes", 0)
                 used_gb = c.get("traffic_used_bytes", 0) / 1024**3
                 resp["sub"] = {
@@ -1612,7 +1720,9 @@ def _device_line(d: dict) -> str:
     else:
         when = f"{seen // 86400} дн назад"
     ip = d.get("ip") or "—"
-    return f"IP {esc(ip)} · был активен {when}"
+    added = fmt_ts(int(d.get("first_seen") or 0)) if d.get("first_seen") else "—"
+    return (f"Добавлено: {esc(added)} (МСК)\n"
+            f"IP {esc(ip)} · был активен {when}")
 
 
 async def _devices_view(user) -> tuple[str, InlineKeyboardMarkup] | None:
@@ -1708,7 +1818,8 @@ async def device_select(cb: CallbackQuery):
         + (f"Система: {sys_line}\n" if sys_line else "")
         + f"{_device_line(d)}\n"
         f"Метка: <code>{esc((d.get('label') or d.get('id') or '')[:20])}…</code>\n"
-        f"Подключено: {fmt_ts(int(d.get('first_seen') or 0))} (МСК)\n\n"
+        f"Добавлено: {fmt_ts(int(d.get('first_seen') or 0))} (МСК)\n"
+        f"Последняя активность: {fmt_ts(int(d.get('last_seen') or 0))} (МСК)\n\n"
         f"❗ После удаления устройство больше не сможет пользоваться "
         f"подпиской, пока заново не добавит её в приложение."
     )
