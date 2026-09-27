@@ -46,6 +46,11 @@ button{border:none;border-radius:12px;padding:10px 16px;font-size:14px;font-weig
 .p-no{background:rgba(255,90,90,.15);color:#ff5a5a}
 .traffic-bar{height:8px;background:#2c2340;border-radius:99px;overflow:hidden;margin:6px 0 2px}
 .traffic-fill{height:100%;background:var(--acc2);border-radius:99px;transition:width .4s}
+.tabs{display:flex;gap:6px;margin-bottom:12px}
+.tab{flex:1;background:#2c2340;color:var(--dim);padding:9px 4px;font-size:13px;border-radius:10px}
+.tab.on{background:linear-gradient(135deg,#e5527a,#ff7a9e);color:#fff}
+.mini{background:#2c2340;color:var(--txt);padding:8px 12px;font-size:12px;border-radius:10px;margin-left:6px}
+.tariff .btns{display:flex;align-items:center}
 </style></head><body>
 <div class="wrap">
   <h1>🍉 Арбузик VPN</h1>
@@ -56,19 +61,13 @@ button{border:none;border-radius:12px;padding:10px 16px;font-size:14px;font-weig
     <div class="card" id="statusCard"></div>
 
     <div class="card">
-      <h2>📱 Приложения для VPN</h2>
-      <div class="mono" style="margin:0 0 10px">Установите приложение, затем нажмите кнопку в карточке
-      «Подключить в 1 клик» — или скопируйте ссылку подписки ниже.</div>
-      <button class="btn2" onclick="tg.openLink('https://happ.su/downloads/')">📲 Happ — Windows, Android, iOS (рекомендую)</button>
-      <button class="btn2" onclick="tg.openLink('https://github.com/INCY-DEV/incy-platforms/releases')">🍏 Incy — iOS, Android, TV</button>
-      <button class="btn2" onclick="tg.openLink('https://play.google.com/store/apps/details?id=com.v2ray.ang')">🤖 v2rayNG — Android</button>
-    </div>
-
-    <div class="card" id="importCard" style="display:none">
-      <h2>🚀 Подключить в 1 клик</h2>
-      <div class="mono" style="margin:0 0 10px">Приложение должно быть установлено. Откроется страница
-      в браузере — нажмите кнопку, и подписка добавится в приложение сама.</div>
-      <div id="import"></div>
+      <h2>📱 Подключить приложение</h2>
+      <div class="tabs">
+        <button class="tab" id="tab-android" onclick="selOS('android')">🤖 Android</button>
+        <button class="tab" id="tab-ios" onclick="selOS('ios')">🍏 iOS</button>
+        <button class="tab" id="tab-windows" onclick="selOS('windows')">🖥 Windows</button>
+      </div>
+      <div id="oscontent"></div>
     </div>
 
     <div class="card">
@@ -178,18 +177,8 @@ async function load(){
     }
     document.getElementById('links').innerHTML = lh;
 
-    const ic = document.getElementById('importCard');
-    if(me.links){
-      window.SUBURL = me.links.sub;
-      document.getElementById('import').innerHTML =
-        '<button class="btn2" onclick="imp(\'happ\')">🍏 Happ — добавить подписку</button>' +
-        '<button class="btn2" onclick="imp(\'incy\')">🍏 Incy — добавить подписку</button>' +
-        '<button class="btn2" onclick="imp(\'v2rayng\')">🤖 v2rayNG — добавить подписку</button>' +
-        '<button class="btn2" onclick="imp(\'hiddify\')">🟣 Hiddify — добавить подписку</button>';
-      ic.style.display = 'block';
-    } else {
-      ic.style.display = 'none';
-    }
+    window.SUBURL = me.links ? me.links.sub : '';
+    if(window.OS) selOS(window.OS);
 
     if(me.is_admin){ loadAdmin(); } else { document.getElementById('admin').style.display='none'; }
   }catch(e){ console.error(e); }
@@ -259,5 +248,51 @@ function imp(app){
   const u = location.origin + '/import?app=' + app + '&url=' + encodeURIComponent(s);
   tg.openLink(u);
 }
+
+const APPS = {
+  android: [
+    {id:'happ',    name:'Happ (рекомендую)', dl:'https://happ.su/downloads/'},
+    {id:'incy',    name:'Incy',              dl:'https://github.com/INCY-DEV/incy-platforms/releases'},
+    {id:'v2rayng', name:'v2rayNG',           dl:'https://play.google.com/store/apps/details?id=com.v2ray.ang'},
+    {id:'hiddify', name:'Hiddify',           dl:'https://github.com/hiddify/hiddify-app/releases'},
+  ],
+  ios: [
+    {id:'happ', name:'Happ (рекомендую)', dl:'https://apps.apple.com/us/app/happ-proxy-utility/id6504287215'},
+    {id:'incy', name:'Incy',              dl:'https://github.com/INCY-DEV/incy-platforms/releases'},
+  ],
+  windows: [
+    {id:'happ', name:'Happ (рекомендую)', dl:'https://happ.su/downloads/'},
+  ],
+};
+
+function selOS(os){
+  window.OS = os;
+  ['android','ios','windows'].forEach(o=>{
+    document.getElementById('tab-'+o).classList.toggle('on', o===os);
+  });
+  let h = '';
+  (APPS[os]||[]).forEach(a=>{
+    h += '<div class="tariff"><div class="nm">' + a.name + '</div><div class="btns">' +
+      '<button class="mini" onclick="tg.openLink(\'' + a.dl + '\')">📥 Скачать</button>' +
+      (window.SUBURL ? '<button class="mini buy" onclick="imp(\'' + a.id + '\')">🚀 Добавить</button>' : '') +
+      '</div></div>';
+  });
+  if(!window.SUBURL){
+    h += '<div class="mono">Получите подписку в боте (🎁 «Бесплатная») — появится кнопка «Добавить», и подписка импортируется в приложение в 1 клик.</div>';
+  } else {
+    h += '<div class="mono">«🚀 Добавить» — откроется страница в браузере, нажмите кнопку, и подписка сама добавится в приложение.</div>';
+  }
+  document.getElementById('oscontent').innerHTML = h;
+}
+
+// автопоиск платформы пользователя (tg.platform: android/ios/tdesktop/macos/…)
+(function(){
+  const p = (window.Telegram && tg.platform) || '';
+  const os = p==='ios' ? 'ios'
+    : p==='android' ? 'android'
+    : (p==='tdesktop'||p==='macos'||p==='windows'||p==='weba'||p==='webk') ? 'windows'
+    : 'android';
+  selOS(os);
+})();
 load();
 </script></body></html>

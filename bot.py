@@ -1428,22 +1428,28 @@ async def qr_key(cb: CallbackQuery):
 
 # ---------- устройства ----------
 
-def _device_title(d: dict) -> str:
+def _device_os(d: dict) -> str:
+    ua = (d.get("user_agent") or "").lower()
+    if "ios" in ua or "darwin" in ua or "iphone" in ua or "ipad" in ua:
+        return "iOS 🍏"
+    if "android" in ua:
+        return "Android 🤖"
+    if "windows" in ua:
+        return "Windows 🖥"
+    if "mac" in ua:
+        return "macOS 🍎"
+    if "linux" in ua:
+        return "Linux 🐧"
+    return "Устройство ❓"
+
+
+def _app_ver(d: dict) -> str:
+    """Приложение и версия из user_agent (для подробностей устройства)."""
     ua = (d.get("user_agent") or "").strip()
-    m = re.match(r"([A-Za-z0-9]+)\s*/?\s*([\d.]+)?\s*/?\s*(\w+)?", ua)
-    app = m.group(1).capitalize() if m and m.group(1) else "Устройство"
-    ver = f" {m.group(2)}" if m and m.group(2) else ""
-    plat = ""
-    low = ua.lower()
-    if "ios" in low or "darwin" in low or "iphone" in low:
-        plat = " · iOS 🍏"
-    elif "android" in low:
-        plat = " · Android 🤖"
-    elif "windows" in low:
-        plat = " · Windows 🖥"
-    elif "mac" in low:
-        plat = " · macOS 🍎"
-    return f"{app}{ver}{plat}"
+    m = re.match(r"([A-Za-z0-9]+)\s*/?\s*([\d.]+)?", ua)
+    if not m or not m.group(1):
+        return "—"
+    return m.group(1).capitalize() + (f" {m.group(2)}" if m.group(2) else "")
 
 
 def _device_line(d: dict) -> str:
@@ -1473,9 +1479,9 @@ async def _devices_view(user) -> tuple[str, InlineKeyboardMarkup] | None:
     ]
     kb_rows = []
     for i, d in enumerate(devices):
-        lines.append(f"<b>{i + 1}. {_device_title(d)}</b>\n{_device_line(d)}\n")
+        lines.append(f"<b>{i + 1}. {_device_os(d)}</b>\n{_device_line(d)}\n")
         kb_rows.append([InlineKeyboardButton(
-            text=f"{i + 1}. {_device_title(d)}",
+            text=f"{i + 1}. {_device_os(d)}",
             callback_data=f"devsel:{i}")])
     if not devices:
         lines.append("Пока ни одного устройства — обновите подписку в приложении.")
@@ -1543,7 +1549,8 @@ async def device_select(cb: CallbackQuery):
         return
     d = devices[idx]
     text = (
-        f"{_device_title(d)}\n\n"
+        f"<b>{_device_os(d)}</b>\n\n"
+        f"Приложение: {_app_ver(d)}\n"
         f"{_device_line(d)}\n"
         f"Метка: <code>{esc((d.get('label') or d.get('id') or '')[:20])}…</code>\n"
         f"Подключено: {fmt_ts(int(d.get('first_seen') or 0))} (МСК)\n\n"
@@ -1576,7 +1583,7 @@ async def device_delete(cb: CallbackQuery):
             await cb.answer("Список изменился, обновите.", show_alert=True)
             return
         d = devices[idx]
-        title = _device_title(d)
+        title = _device_os(d)
         client = await api.reset_devices(user["client_name"])
     except PanelError as e:
         log.error("reset devices: %s", e)
