@@ -301,6 +301,14 @@ def init_db() -> None:
                 confirmed_at INTEGER
             )
         """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS device_meta(
+                hwid_hash TEXT PRIMARY KEY,
+                model TEXT,
+                os_ver TEXT,
+                last_seen INTEGER
+            )
+        """)
         cols = [r[1] for r in c.execute("PRAGMA table_info(payments)").fetchall()]
         if "method" not in cols:
             c.execute("ALTER TABLE payments ADD COLUMN method TEXT DEFAULT 'card'")
@@ -454,6 +462,78 @@ def fmt_ts(ts: int) -> str:
 
 def gb(bytes_: int) -> str:
     return f"{bytes_ / 1024**3:.2f}"
+
+
+# модели устройств, которые приложения могут указать в User-Agent
+DEVICE_MODEL_RE = re.compile(
+    r"(iphone\s?\d+[\w,]*|ipad[\w,]*|sm-[a-z0-9]+|tecno[ \w-]{0,15}|infinix[ \w-]{0,15}"
+    r"|redmi[ \w-]{0,15}|poco[ \w-]{0,15}|pixel \d[\w -]{0,10}|huawei[ \w-]{0,15}"
+    r"|honor[ \w-]{0,15}|galaxy[ \w-]{0,15})", re.I)
+
+
+def parse_device_ua(ua: str) -> tuple[str | None, str | None]:
+    """(модель, версия ОС) из User-Agent обновления подписки."""
+    if not ua:
+        return None, None
+    low = ua.lower()
+    model = None
+    m = DEVICE_MODEL_RE.search(low)
+    if m:
+        model = m.group(1).strip()
+        nice = {"iphone": "iPhone", "ipad": "iPad", "sm-": "SM-",
+                "poco": "POCO", "huawei": "HUAWEI"}
+        words = []
+        for w in model.split():
+            for k, v in nice.items():
+                if w.startswith(k):
+                    w = v + w[len(k):]
+                    break
+            else:
+                w = w.capitalize()
+            words.append(w)
+        model = " ".join(words)
+    os_ver = None
+    m = re.search(r"darwin/(\d+)", low)
+    if m:                      # Darwin N ≈ iOS N
+        os_ver = "iOS " + m.group(1)
+    else:
+        m = re.search(r"\bios[ /](\d+)", low)
+        if m:
+            os_ver = "iOS " + m.group(1)
+        else:
+            m = re.search(r"android[ /](\d+)", low)
+            if m:
+                os_ver = "Android " + m.group(1)
+    return model, os_ver
+
+
+def save_device_meta(hwid_raw: str, ua: str) -> None:
+    """Запомнить модель/ОС устройства (ключ — sha256 от x-hwid, как в панели)."""
+    try:
+        hwid_hash = hashlib.sha256(hwid_raw.encode()).hexdigest()
+        model, os_ver = parse_device_ua(ua)
+        with conn() as c:
+            c.execute("""
+                INSERT INTO device_meta(hwid_hash, model, os_ver, last_seen)
+                VALUES(?, ?, ?, ?)
+                ON CONFLICT(hwid_hash) DO UPDATE SET
+                    model = COALESCE(excluded.model, model),
+                    os_ver = COALESCE(excluded.os_ver, os_ver),
+                    last_seen = excluded.last_seen
+            """, (hwid_hash, model, os_ver, int(time.time())))
+    except Exception as e:
+        log.warning("save_device_meta: %s", e)
+
+
+def device_meta_for(d: dict) -> dict:
+    did = d.get("id") or ""
+    hwid_hash = did.split(":", 1)[1] if ":" in did else did
+    if not hwid_hash:
+        return {}
+    with conn() as c:
+        row = c.execute("SELECT model, os_ver FROM device_meta WHERE hwid_hash = ?",
+                        (hwid_hash,)).fetchone()
+    return dict(row) if row else {}
 
 
 def sub_link(uuid: str) -> str:
@@ -818,6 +898,10 @@ if (navigator.userAgent.indexOf('Android') !== -1) {{
         if not uuid:
             self._json({"ok": False, "error": "not_found"}, 404)
             return
+        # запоминаем модель/ОС устройства (ключ — sha256 от x-hwid, как в панели)
+        hwid_raw = self.headers.get("x-hwid") or self.headers.get("x-device-id") or ""
+        if hwid_raw:
+            save_device_meta(hwid_raw, self.headers.get("user-agent", ""))
         url = PANEL_URL.rstrip("/") + "/sub/" + uuid
         if parsed.query:
             url += "?" + parsed.query
@@ -1443,6 +1527,20 @@ def _device_os(d: dict) -> str:
     return "Устройство ❓"
 
 
+def _device_title(d: dict) -> str:
+    """Модель + ОС из сохранённых заголовков; иначе просто ОС."""
+    meta = device_meta_for(d)
+    model, os_ver = meta.get("model"), meta.get("os_ver")
+    if model and os_ver:
+        return f"{model} · {os_ver}"
+    if model:
+        return model
+    if os_ver:
+        emoji = "🍏" if "ios" in os_ver.lower() else "🤖"
+        return f"{os_ver} {emoji}"
+    return _device_os(d)
+
+
 def _app_ver(d: dict) -> str:
     """Приложение и версия из user_agent (для подробностей устройства)."""
     ua = (d.get("user_agent") or "").strip()
@@ -1479,12 +1577,15 @@ async def _devices_view(user) -> tuple[str, InlineKeyboardMarkup] | None:
     ]
     kb_rows = []
     for i, d in enumerate(devices):
-        lines.append(f"<b>{i + 1}. {_device_os(d)}</b>\n{_device_line(d)}\n")
+        lines.append(f"<b>{i + 1}. {_device_title(d)}</b>\n{_device_line(d)}\n")
         kb_rows.append([InlineKeyboardButton(
-            text=f"{i + 1}. {_device_os(d)}",
+            text=f"{i + 1}. {_device_title(d)}",
             callback_data=f"devsel:{i}")])
     if not devices:
         lines.append("Пока ни одного устройства — обновите подписку в приложении.")
+    else:
+        lines.append("Название устройства появится после того, как приложение "
+                     "обновит подписку (откройте приложение).")
     kb_rows.append([InlineKeyboardButton(text="📱 Приложения для VPN",
                                          callback_data="appsinfo")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb_rows)
@@ -1548,10 +1649,13 @@ async def device_select(cb: CallbackQuery):
         await cb.answer("Список изменился, обновите.", show_alert=True)
         return
     d = devices[idx]
+    meta = device_meta_for(d)
+    sys_line = " · ".join(x for x in (meta.get("model"), meta.get("os_ver")) if x)
     text = (
-        f"<b>{_device_os(d)}</b>\n\n"
+        f"<b>{_device_title(d)}</b>\n\n"
         f"Приложение: {_app_ver(d)}\n"
-        f"{_device_line(d)}\n"
+        + (f"Система: {sys_line}\n" if sys_line else "")
+        + f"{_device_line(d)}\n"
         f"Метка: <code>{esc((d.get('label') or d.get('id') or '')[:20])}…</code>\n"
         f"Подключено: {fmt_ts(int(d.get('first_seen') or 0))} (МСК)\n\n"
         f"❗ После удаления устройство больше не сможет пользоваться "
@@ -1583,7 +1687,7 @@ async def device_delete(cb: CallbackQuery):
             await cb.answer("Список изменился, обновите.", show_alert=True)
             return
         d = devices[idx]
-        title = _device_os(d)
+        title = _device_title(d)
         client = await api.reset_devices(user["client_name"])
     except PanelError as e:
         log.error("reset devices: %s", e)
