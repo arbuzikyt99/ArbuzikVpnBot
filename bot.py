@@ -1229,7 +1229,7 @@ async def free_trial(message: Message):
     tg_id = message.from_user.id
     upsert_user(tg_id, message.from_user.username)
     user = get_user(tg_id)
-    if user["trial_count"] >= TRIAL_LIMIT:
+    if tg_id != ADMIN_ID and user["trial_count"] >= TRIAL_LIMIT:
         await message.answer(
             f"🎁 Бесплатная подписка выдаётся максимум {TRIAL_LIMIT} раза — "
             f"вы уже использовали все.\n"
@@ -1245,7 +1245,11 @@ async def free_trial(message: Message):
         return
     take_trial(tg_id)
     await backup_now()
-    remain_txt = f" (осталось бесплатных: {left - 1})" if left - 1 else " (это была последняя бесплатная)"
+    if tg_id == ADMIN_ID:
+        remain_txt = " (админ: без ограничений 👑)"
+    else:
+        remain_txt = (f" (осталось бесплатных: {left - 1})"
+                      if left - 1 else " (это была последняя бесплатная)")
     await message.answer(
         f"🎉 <b>Бесплатная подписка активирована!</b>{remain_txt}\n\n"
         f"Дней: <b>{TRIAL_DAYS}</b> · Трафик: <b>{TRIAL_GB} ГБ</b>\n\n"
