@@ -579,14 +579,33 @@ async def ensure_client(tg_id: int, days: int, traffic_gb: int, device_limit: in
 
 
 async def grant_days(tg_id: int, days: int, traffic_gb: int, device_limit: int) -> dict:
-    """Выдать/продлить подписку: активную продлевает, истёкшую — от сегодня."""
-    client = await ensure_client(tg_id, days, traffic_gb, device_limit)
+    """Выдать/продлить подписку: активную продлевает, истёкшую — от сегодня.
+
+    Новому клиенту создаётся сразу с нужным сроком (без повторного
+    продления — иначе дни начислялись бы дважды).
+    """
+    user = get_user(tg_id)
+    name = user["client_name"] if (user and user["client_name"]) else client_name_for(tg_id)
+    client = await api.get(name)
     now = int(time.time())
+    if client is None:
+        try:
+            client = await api.create(name, days=days, traffic_gb=traffic_gb,
+                                      device_limit=device_limit)
+        except PanelError as e:
+            if "already_exists" in str(e) or "exists" in str(e) or "conflict" in str(e).lower():
+                client = await api.get(name)
+                if client is None:
+                    raise
+            else:
+                raise
+        set_client(tg_id, name)
+        return client
     if client["expires_at"] < now:  # истекла — новая дата от текущего момента
-        client = await api.extend(client["name"], expires_at=now + days * 86400,
+        client = await api.extend(name, expires_at=now + days * 86400,
                                   traffic_gb=traffic_gb, device_limit=device_limit)
     else:                            # активна — добавляем дни
-        client = await api.extend(client["name"], days=days,
+        client = await api.extend(name, days=days,
                                   traffic_gb=traffic_gb, device_limit=device_limit)
     return client
 
