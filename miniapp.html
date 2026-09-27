@@ -181,6 +181,7 @@ async function load(){
     document.getElementById('links').innerHTML = lh;
 
     window.SUBURL = me.links ? me.links.sub : '';
+    window.INCYURL = me.links ? me.links.incy : '';
     if(window.OS) selOS(window.OS);
 
     if(me.is_admin){ loadAdmin(); } else { document.getElementById('admin').style.display='none'; }
@@ -252,7 +253,9 @@ function cp(text){
 }
 
 function imp(app){
-  const s = window.SUBURL || '';
+  // для Incy — ссылка с ?format=xray: в этом формате панель отдаёт
+  // конфиг с «🇪🇺 Автовыбор», сырая ссылка даёт только список стран
+  const s = (app === 'incy' ? window.INCYURL : window.SUBURL) || '';
   if(!s){ tg.showAlert('Сначала получите подписку'); return; }
   // Telegram-вебвью блокирует happ:// и другие схемы, поэтому открываем
   // промежуточную страницу в обычном браузере — она запустит приложение
