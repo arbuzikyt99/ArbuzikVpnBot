@@ -324,6 +324,14 @@ def init_db() -> None:
                 PRIMARY KEY(uuid, device_id)
             )
         """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS sub_cache(
+                uuid TEXT PRIMARY KEY,
+                body BLOB,
+                headers TEXT,
+                ts INTEGER
+            )
+        """)
         cols = [r[1] for r in c.execute("PRAGMA table_info(payments)").fetchall()]
         if "method" not in cols:
             c.execute("ALTER TABLE payments ADD COLUMN method TEXT DEFAULT 'card'")
@@ -1032,6 +1040,16 @@ if (navigator.userAgent.indexOf('Android') !== -1) {{
             # панель недоступна — отдаём последний рабочий конфиг из кэша,
             # чтобы подписка в приложении не «слетала» при флапах панели
             cached = _SUB_CACHE.get(uuid)
+            if not cached:
+                try:
+                    with conn() as c:
+                        row = c.execute("SELECT body, headers, ts FROM sub_cache "
+                                        "WHERE uuid = ?", (uuid,)).fetchone()
+                    if row and time.time() - row["ts"] < 7 * 86400:
+                        cached = {"body": bytes(row["body"]),
+                                  "headers": json.loads(row["headers"] or "{}")}
+                except Exception as e:
+                    log.warning("sub cache read: %s", e)
             if cached:
                 log.warning("sub proxy: панель недоступна, кэш для %s…", uuid[:8])
                 self.send_response(200)
@@ -1071,13 +1089,24 @@ if (navigator.userAgent.indexOf('Android') !== -1) {{
                 uuid, hwid_raw, self.headers.get("user-agent", "")))
         # успешный ответ — обновляем кэш «последнего рабочего конфига»
         if r.status_code == 200:
-            _SUB_CACHE[uuid] = {
-                "ts": time.time(), "body": body,
+            entry = {
+                "ts": int(time.time()), "body": body,
                 "headers": {h: r.headers[h] for h in
                             ("content-type", "profile-title",
                              "profile-update-interval", "subscription-userinfo",
                              "announce") if h in r.headers},
             }
+            _SUB_CACHE[uuid] = entry
+            try:
+                with conn() as c:
+                    c.execute("INSERT INTO sub_cache(uuid, body, headers, ts) "
+                              "VALUES(?, ?, ?, ?) ON CONFLICT(uuid) DO UPDATE SET "
+                              "body = excluded.body, headers = excluded.headers, "
+                              "ts = excluded.ts",
+                              (uuid, body, json.dumps(entry["headers"]),
+                               entry["ts"]))
+            except Exception as e:
+                log.warning("sub cache write: %s", e)
         self.send_response(r.status_code)
         for h in ("content-type", "profile-title", "profile-update-interval",
                   "subscription-userinfo", "announce"):
