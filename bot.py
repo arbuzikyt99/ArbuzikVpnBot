@@ -134,7 +134,7 @@ class PanelAPI:
         self.headers = {"Authorization": "Bearer " + PANEL_TOKEN}
 
     async def _request(self, method: str, path: str, json_body: dict | None = None,
-                       retries: int = 3) -> dict:
+                       retries: int = 4) -> dict:
         last_err = None
         for attempt in range(retries):
             try:
@@ -151,9 +151,9 @@ class PanelAPI:
             except PanelError:
                 raise  # ошибка логики панели — повторять бессмысленно
             except (httpx.HTTPError, OSError) as e:
-                last_err = e  # сетевой сбой — повторяем
+                last_err = e  # сетевой сбой — повторяем с растущей паузой
                 if attempt < retries - 1:
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(min(2 * (attempt + 1), 6))
         raise PanelError(f"Панель недоступна: {last_err}")
 
     async def create(self, name: str, days: int, traffic_gb: int, device_limit: int) -> dict:
@@ -867,6 +867,11 @@ def validate_init_data(init_data: str) -> int | None:
         return None
 
 
+# последний успешный ответ подписки: uuid → {ts, body, headers};
+# отдаётся, когда панель недоступна, чтобы подписка не «слетала» в приложении
+_SUB_CACHE: dict[str, dict] = {}
+
+
 class MiniAppHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         log.info("miniapp: " + fmt, *args)
@@ -1013,17 +1018,30 @@ if (navigator.userAgent.indexOf('Android') !== -1) {{
             if v:
                 fwd[h] = v
         r = None
-        # панель периодически флапает — одна повторная попытка
-        for attempt in range(2):
+        # панель периодически флапает — до трёх попыток
+        for attempt in range(3):
             try:
                 async with httpx.AsyncClient(timeout=40, follow_redirects=True) as c:
                     r = await c.get(url, headers=fwd)
                 break
             except (httpx.HTTPError, OSError) as e:
                 log.error("sub proxy (попытка %d): %s", attempt + 1, e)
-                if attempt == 0:
-                    await asyncio.sleep(1.5)
+                if attempt < 2:
+                    await asyncio.sleep(2)
         if r is None:
+            # панель недоступна — отдаём последний рабочий конфиг из кэша,
+            # чтобы подписка в приложении не «слетала» при флапах панели
+            cached = _SUB_CACHE.get(uuid)
+            if cached:
+                log.warning("sub proxy: панель недоступна, кэш для %s…", uuid[:8])
+                self.send_response(200)
+                for h, v in cached["headers"].items():
+                    self.send_header(h, v)
+                self.send_header("X-Cached-Sub", "1")
+                self.send_header("Content-Length", str(len(cached["body"])))
+                self.end_headers()
+                self.wfile.write(cached["body"])
+                return
             self._json({"ok": False, "error": "panel unreachable"}, 502)
             return
         body = r.content
@@ -1051,6 +1069,15 @@ if (navigator.userAgent.indexOf('Android') !== -1) {{
         if r.status_code == 200 and hwid_raw:
             asyncio.create_task(notify_new_device(
                 uuid, hwid_raw, self.headers.get("user-agent", "")))
+        # успешный ответ — обновляем кэш «последнего рабочего конфига»
+        if r.status_code == 200:
+            _SUB_CACHE[uuid] = {
+                "ts": time.time(), "body": body,
+                "headers": {h: r.headers[h] for h in
+                            ("content-type", "profile-title",
+                             "profile-update-interval", "subscription-userinfo",
+                             "announce") if h in r.headers},
+            }
         self.send_response(r.status_code)
         for h in ("content-type", "profile-title", "profile-update-interval",
                   "subscription-userinfo", "announce"):
@@ -1501,9 +1528,16 @@ async def free_trial(message: Message):
     left = TRIAL_LIMIT - user["trial_count"]
     try:
         client = await ensure_client(tg_id, TRIAL_DAYS, TRIAL_GB, TRIAL_DEVICES)
+        # у уже существующего, но ИСТЁКШЕГО клиента ensure_client ничего не
+        # менял — «бесплатная» выглядела как «не выдаётся»; продлеваем от сейчас
+        if client["expires_at"] < int(time.time()):
+            client = await grant_days(tg_id, TRIAL_DAYS, TRIAL_GB,
+                                      client.get("device_limit") or TRIAL_DEVICES)
     except PanelError as e:
         log.error("trial create failed: %s", e)
-        await message.answer("⚠️ Не получилось создать подписку. Попробуйте позже или напишите в поддержку.")
+        await message.answer(
+            "⚠️ Сервер временно недоступен. Нажмите «🎁 Бесплатная» "
+            "ещё раз через минуту — подписка не потеряется.")
         return
     take_trial(tg_id)
     await backup_now()
