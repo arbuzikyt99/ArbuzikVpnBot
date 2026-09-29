@@ -1825,7 +1825,10 @@ async def devices_list(message: Message):
     try:
         view = await _devices_view(user)
     except PanelError:
-        view = None
+        await message.answer(
+            "⚠️ Сервер временно недоступен — откройте «📱 Устройства» "
+            "ещё раз через пару минут. Ваша подписка на месте.")
+        return
     if view is None:
         await message.answer("⚠️ Подписка не найдена на сервере. Напишите в поддержку.")
         return
@@ -1845,7 +1848,9 @@ async def devices_back(cb: CallbackQuery):
     try:
         view = await _devices_view(user)
     except PanelError:
-        view = None
+        await cb.answer("Сервер недоступен, попробуйте через пару минут.",
+                        show_alert=True)
+        return
     if view is None:
         await cb.answer("Подписка не найдена.", show_alert=True)
         return
@@ -1867,7 +1872,8 @@ async def device_select(cb: CallbackQuery):
     try:
         client = await api.get(user["client_name"])
     except PanelError:
-        client = None
+        await cb.answer("Сервер недоступен, попробуйте позже.", show_alert=True)
+        return
     devices = (client or {}).get("devices") or []
     if not (0 <= idx < len(devices)):
         await cb.answer("Список изменился, обновите.", show_alert=True)
