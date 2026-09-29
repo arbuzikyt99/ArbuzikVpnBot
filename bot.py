@@ -23,6 +23,7 @@ import subprocess
 import threading
 import time
 import urllib.parse
+import socket
 from datetime import datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -51,6 +52,8 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", "7706026760"))
 # Панель H1 VLESS (сервер перенесён хостингом на ноду de1 — старый
 # germany-d1.h1cloud.net больше не резолвится, из-за чего все запросы падали)
 PANEL_URL = os.environ.get("PANEL_URL", "http://de1.h1cloud.net:25363")
+# запасные адреса панели: хостинг переносит ноды, старые домены умирают
+PANEL_FALLBACKS = ["http://de1.h1cloud.net:25363", "http://germany-d1.h1cloud.net:25363"]
 PANEL_TOKEN = os.environ.get(
     "PANEL_TOKEN",
     "2e03f56856784339b918d068f1759e03e7608d4365ba42cfa00aec940ec7244a")
@@ -200,6 +203,25 @@ class PanelAPI:
         data = await self._request("PATCH", f"/clients/{name}/reset-devices", {})
         return data["client"]
 
+
+def _panel_host_ok(url: str) -> bool:
+    try:
+        host = urllib.parse.urlparse(url).hostname
+        socket.getaddrinfo(host, None)
+        return True
+    except OSError:
+        return False
+
+
+# хостинг переносит ноды и старые домены умирают: если хост PANEL_URL
+# не резолвится — автоматически переключаемся на живой запасной адрес
+if not _panel_host_ok(PANEL_URL):
+    for _cand in PANEL_FALLBACKS:
+        if _cand != PANEL_URL and _panel_host_ok(_cand):
+            log.warning("PANEL_URL %s не резолвится — переключаюсь на %s",
+                        PANEL_URL, _cand)
+            PANEL_URL = _cand
+            break
 
 api = PanelAPI()
 
