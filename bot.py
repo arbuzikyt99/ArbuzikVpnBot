@@ -48,8 +48,9 @@ from aiogram.types import (
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8815266530:AAEYbUEvbUi5Aho_ZfETOIaA8gkoo0LOBDo")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "7706026760"))
 
-# Панель H1 VLESS
-PANEL_URL = os.environ.get("PANEL_URL", "http://germany-d1.h1cloud.net:25363")
+# Панель H1 VLESS (сервер перенесён хостингом на ноду de1 — старый
+# germany-d1.h1cloud.net больше не резолвится, из-за чего все запросы падали)
+PANEL_URL = os.environ.get("PANEL_URL", "http://de1.h1cloud.net:25363")
 PANEL_TOKEN = os.environ.get(
     "PANEL_TOKEN",
     "2e03f56856784339b918d068f1759e03e7608d4365ba42cfa00aec940ec7244a")
