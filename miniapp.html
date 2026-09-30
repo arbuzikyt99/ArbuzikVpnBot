@@ -104,7 +104,7 @@ button{border:none;border-radius:12px;padding:10px 16px;font-size:14px;font-weig
       </div>
       Поддержка: <b>@ArbuzikV_bot</b> (чат в боте)<br>
       Тарифы: 1 мес — 85 ₽ · 3 мес — 340 ₽ · 6 мес — 500 ₽<br>
-      <span class="dim">© Арбузик VPN, 2026 · verplatega</span>
+      <span class="dim">© Арбузик VPN, 2026</span>
     </div>
   </div>
   <div id="noauth" style="display:none" class="card center">
@@ -249,7 +249,7 @@ async function buy(i, price){
   try{
     const r = await api('/api/invoice', {tariff: i});
     if(r.ok && r.pay_url){
-      tg.openTelegramLink(r.pay_url);
+      tg.openLink(r.pay_url);
     } else {
       tg.showAlert(r.error || 'Не удалось создать счёт');
     }

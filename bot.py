@@ -68,6 +68,14 @@ CRYPTOBOT_TOKEN = os.environ.get(
     "CRYPTOBOT_TOKEN", "636063:AAQXvXF4uJsA5nlJDlNZ1XGD3bJ6wdH8I2z")
 CRYPTOBOT_FIAT = "RUB"  # выставлять счёт в рублях
 
+# Оплата через Platega (СБП / карта, рубли)
+PLATEGA_MERCHANT = os.environ.get("PLATEGA_MERCHANT",
+                                  "73f325ed-3b2d-4754-a5cd-e9bd466c5430")
+PLATEGA_SECRET = os.environ.get(
+    "PLATEGA_SECRET",
+    "IAgacM8SYOD4uTtM3IPl2CuxHdHDp2iksO0AsYx5xOvicTEbJ0JIcEGJlSVdAEXLnPdFxRgEiNd7X5SWDXFcKsc2sfVoZMgHubZe")
+PLATEGA_API = "https://app.platega.io"
+
 # Сохранение базы на GitHub (приватный репозиторий), чтобы данные не
 # терялись при деплое. Токен передаётся только через переменные окружения.
 GH_TOKEN = os.environ.get("GITHUB_DB_TOKEN", "")
@@ -104,7 +112,7 @@ PRIVACY_URL = "https://telegra.ph/Politika-konfidencialnosti--Arbuzik-VPN-09-25"
 TERMS_URL = "https://telegra.ph/Polzovatelskoe-soglashenie--Arbuzik-VPN-09-25"
 BOT_DESCRIPTION = (
     "Сервис «Арбузик VPN»: доступ к частной сети по подписке. "
-    "Тарифы от 85 ₽, пробный период. Информация: /info  ·  verplatega"
+    "Тарифы от 85 ₽, пробный период. Информация: /info"
 )
 WELCOME = (
     f"Привет! Это <b>{BRAND}</b>\n\n"
@@ -282,6 +290,63 @@ class CryptoPay:
         return items
 
 
+class PlategaError(Exception):
+    pass
+
+
+class Platega:
+    """Платёжный сервис Platega: СБП (QR-код) в рублях.
+
+    Авторизация — заголовки X-MerchantId и X-Secret. Поле command="pay"
+    обязательно, хотя в документации его нет.
+    """
+    BASE = PLATEGA_API
+
+    @property
+    def _headers(self) -> dict:
+        return {"X-MerchantId": PLATEGA_MERCHANT, "X-Secret": PLATEGA_SECRET}
+
+    async def _call(self, method: str, path: str,
+                    json_body: dict | None = None) -> dict:
+        last_err = None
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient(timeout=30) as c:
+                    r = await c.request(method, self.BASE + path,
+                                        headers=self._headers, json=json_body)
+                if r.status_code >= 400:
+                    raise PlategaError(f"HTTP {r.status_code}: {r.text[:200]}")
+                return r.json() if r.content else {}
+            except (httpx.HTTPError, OSError) as e:
+                last_err = e
+                if attempt < 2:
+                    await asyncio.sleep(2)
+        raise PlategaError(f"Platega недоступен: {last_err}")
+
+    async def create_invoice(self, amount_rub: float, description: str,
+                             tg_id: int, username: str,
+                             order_id: str) -> dict:
+        """Счёт по СБП; возвращает transaction_id и ссылку на оплату."""
+        body = {
+            "command": "pay",
+            "paymentMethod": 2,  # СБП (QR-код)
+            "paymentDetails": {"amount": amount_rub, "currency": "RUB"},
+            "description": description[:1000],
+            "return": MINIAPP_URL or "https://t.me/ArbuzikVPNbot",
+            "failedUrl": MINIAPP_URL or "https://t.me/ArbuzikVPNbot",
+            "orderId": order_id,
+            "metadata": {"userId": str(tg_id), "userName": username or ""},
+        }
+        data = await self._call("POST", "/transaction/process", body)
+        if not data.get("transactionId") or not data.get("redirect"):
+            raise PlategaError(f"нет transactionId/redirect: {data}")
+        return {"transaction_id": data["transactionId"],
+                "redirect": data["redirect"]}
+
+    async def status(self, transaction_id: str) -> dict:
+        return await self._call("GET", f"/transaction/{transaction_id}")
+
+
 # ============================================================
 #                        БАЗА ДАННЫХ (SQLite)
 # ============================================================
@@ -420,7 +485,8 @@ def all_users():
 
 
 def add_payment(tg_id: int, amount: float, days: int, devices: int = 0,
-                method: str = "card", invoice_id: int | None = None) -> int:
+                method: str = "card", invoice_id=None) -> int:
+    # invoice_id: CryptoBot — число, Platega — UUID-строка
     with conn() as c:
         cur = c.execute(
             "INSERT INTO payments(tg_id, amount, days, devices, method, invoice_id, created_at) "
@@ -447,6 +513,30 @@ def pending_crypto_payments():
             "SELECT * FROM payments WHERE method = 'crypto' AND status = 'pending' "
             "AND invoice_id IS NOT NULL"
         ).fetchall()
+
+
+def pending_sbp_payments():
+    with conn() as c:
+        return c.execute(
+            "SELECT * FROM payments WHERE method = 'sbp' AND status = 'pending' "
+            "AND invoice_id IS NOT NULL"
+        ).fetchall()
+
+
+def sbp_payment_by_invoice(transaction_id: str):
+    with conn() as c:
+        return c.execute(
+            "SELECT * FROM payments WHERE method = 'sbp' AND invoice_id = ? "
+            "AND status = 'pending'", (transaction_id,)).fetchone()
+
+
+def claim_payment_pending(pid: int) -> bool:
+    """Атомарно пометить счёт 'processing'; False — уже обработан."""
+    with conn() as c:
+        cur = c.execute(
+            "UPDATE payments SET status = 'processing' WHERE id = ? "
+            "AND status = 'pending'", (pid,))
+        return cur.rowcount > 0
 
 
 def payments_stats() -> dict:
@@ -824,12 +914,16 @@ async def grant_days(tg_id: int, days: int, traffic_gb: int, device_limit: int) 
 
 
 async def fulfill_payment(p) -> None:
-    """Провести оплату: продлить подписку, уведомить юзера и админа."""
+    """Провести оплату: продлить подписку, уведомить юзера и админа.
+
+    Идемпотентно: если счёт уже не 'pending', ничего не делает."""
+    if not claim_payment_pending(p["id"]):
+        return
     devices = p["devices"] or PAID_DEVICES or 0
     client = await grant_days(p["tg_id"], p["days"], PAID_GB, devices)
     set_payment_status(p["id"], "paid")
     await backup_now()
-    method = "CryptoBot 🪙" if p["method"] == "crypto" else "ручная оплата"
+    method = {"crypto": "CryptoBot 🪙", "sbp": "СБП 🏦"}.get(p["method"], "ручная оплата")
     if BOT:
         try:
             await BOT.send_message(
@@ -903,6 +997,11 @@ def validate_init_data(init_data: str) -> int | None:
 _SUB_CACHE: dict[str, dict] = {}
 
 
+def _spawn_task(coro) -> None:
+    """Создать задачу в главном цикле (вызывается через call_soon_threadsafe)."""
+    asyncio.create_task(coro)
+
+
 class MiniAppHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         log.info("miniapp: " + fmt, *args)
@@ -921,6 +1020,38 @@ class MiniAppHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+    def do_POST(self):
+        """Вебхук Platega: POST /platega/callback со статусом транзакции."""
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path.rstrip("/") != "/platega/callback":
+            self._json({"ok": False, "error": "not_found"}, 404)
+            return
+        # авторизация вебхука — те же заголовки, что и у API
+        if (self.headers.get("X-MerchantId") != PLATEGA_MERCHANT
+                or self.headers.get("X-Secret") != PLATEGA_SECRET):
+            self._json({"ok": False, "error": "forbidden"}, 403)
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            data = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            self._json({"ok": False, "error": "bad_json"}, 400)
+            return
+        txn_id = str(data.get("id") or "")
+        status = str(data.get("status") or "")
+        log.info("platega callback: %s %s", txn_id, status)
+        if not txn_id:
+            self._json({"ok": False, "error": "no_id"}, 400)
+            return
+        payment = sbp_payment_by_invoice(txn_id)
+        if payment is None or status != "CONFIRMED":
+            self._json({"ok": True})
+            return
+        # провести оплату в главном цикле бота (мы — в потоке HTTP-сервера)
+        if LOOP and LOOP.is_running():
+            LOOP.call_soon_threadsafe(_spawn_task, fulfill_payment(payment))
+        self._json({"ok": True})
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -1243,14 +1374,15 @@ if (navigator.userAgent.indexOf('Android') !== -1) {{
             return
         name, days, devices, price = TARIFFS[tariff_idx]
         try:
-            inv = await CryptoPay().create_invoice(
-                price, f"Арбузик VPN — {name} ({days} дн.)", payload=f"tg{tg_id}")
-        except CryptoError as e:
-            self._json({"ok": False, "error": f"CryptoBot: {e}"}, 502)
+            inv = await Platega().create_invoice(
+                price, f"Арбузик VPN — {name} ({days} дн.)", tg_id, "",
+                f"tg{tg_id}-{int(time.time())}")
+        except PlategaError as e:
+            self._json({"ok": False, "error": f"Platega: {e}"}, 502)
             return
-        pid = add_payment(tg_id, price, days, devices, method="crypto",
-                          invoice_id=inv["invoice_id"])
-        self._json({"ok": True, "pay_url": inv.get("pay_url", ""),
+        pid = add_payment(tg_id, price, days, devices, method="sbp",
+                          invoice_id=inv["transaction_id"])
+        self._json({"ok": True, "pay_url": inv["redirect"],
                     "payment_id": pid})
 
 
@@ -1659,7 +1791,7 @@ async def buy(message: Message):
     for name, days, devices, price in TARIFFS:
         lines.append(f"▫️ <b>{name}</b> — {price} ₽ ({days} дн., {devices} устр.)")
     lines.append(f"\nТрафик: <b>{PAID_GB} ГБ</b>")
-    lines.append("Оплата: 🪙 криптовалюта через CryptoBot (автоматически)")
+    lines.append("Оплата: 🏦 СБП (рубли) или 🪙 криптовалюта через CryptoBot — автоматически")
     lines.append("💡 Дни складываются: если подписка активна и вы купите ещё, "
                  "дни нового тарифа добавятся к текущим.")
     lines.append("\nВыберите тариф 👇")
@@ -1668,11 +1800,57 @@ async def buy(message: Message):
 
 @router.callback_query(F.data.startswith("tariff:"))
 async def tariff_chosen(cb: CallbackQuery):
-    """Выбор тарифа → сразу создаём счёт в CryptoBot.
+    """Выбор тарифа → выбор способа оплаты.
 
     Повторные счета разрешены: каждый оплачивается отдельно,
     оплаченные дни суммируются с текущей подпиской.
     """
+    idx = int(cb.data.split(":")[1])
+    name, days, devices, price = TARIFFS[idx]
+    await cb.message.answer(
+        f"💳 <b>Тариф «{name}»</b> — {price} ₽ ({days} дн., {devices} устр.)\n\n"
+        f"Выберите способ оплаты:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🏦 СБП / карта (рубли)",
+                                  callback_data=f"payplatega:{idx}")],
+            [InlineKeyboardButton(text="🪙 CryptoBot (крипта)",
+                                  callback_data=f"paycrypto:{idx}")],
+        ]))
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("payplatega:"))
+async def pay_platega(cb: CallbackQuery):
+    """Счёт в Platega по СБП: ссылка на оплату + автоматическая проверка."""
+    idx = int(cb.data.split(":")[1])
+    name, days, devices, price = TARIFFS[idx]
+    order_id = f"tg{cb.from_user.id}-{int(time.time())}"
+    try:
+        inv = await Platega().create_invoice(
+            price, f"Арбузик VPN — {name} ({days} дн.)",
+            cb.from_user.id, cb.from_user.username, order_id)
+    except PlategaError as e:
+        log.error("platega invoice failed: %s", e)
+        await cb.answer("Платёжный сервис недоступен, попробуйте позже",
+                        show_alert=True)
+        return
+    add_payment(cb.from_user.id, price, days, devices,
+                method="sbp", invoice_id=inv["transaction_id"])
+    await cb.message.answer(
+        f"🏦 <b>Счёт создан — СБП</b>\n\n"
+        f"Тариф: {name} — {price} ₽ ({days} дн., {devices} устр.)\n"
+        f"Счёт действует ~15 минут. Оплатите по ссылке или QR — "
+        f"подписка активируется автоматически в течение минуты.\n"
+        f"Если уже есть активная подписка — дни добавятся к ней.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Оплатить по СБП", url=inv["redirect"])],
+        ]))
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("paycrypto:"))
+async def pay_crypto(cb: CallbackQuery):
+    """Счёт в CryptoBot (крипта)."""
     idx = int(cb.data.split(":")[1])
     name, days, devices, price = TARIFFS[idx]
     try:
@@ -2242,6 +2420,27 @@ async def crypto_checker():
         await asyncio.sleep(20)
 
 
+async def platega_checker():
+    """Раз в 20 секунд проверяет неоплаченные счета Platega (СБП)."""
+    pg = Platega()
+    while True:
+        try:
+            for r in pending_sbp_payments():
+                try:
+                    st = await pg.status(r["invoice_id"])
+                except PlategaError as e:
+                    log.warning("platega status %s: %s", r["invoice_id"], e)
+                    continue
+                status = st.get("status")
+                if status == "CONFIRMED":
+                    await fulfill_payment(r)
+                elif status == "CANCELED" and time.time() - r["created_at"] > 3600:
+                    set_payment_status(r["id"], "declined")
+        except Exception as e:
+            log.error("platega_checker: %s", e)
+        await asyncio.sleep(20)
+
+
 async def expiry_checker(bot: Bot):
     """Раз в час проверяет подписки: напоминает за 3 дня и об истечении."""
     while True:
@@ -2335,6 +2534,7 @@ async def main():
     if GH_TOKEN:
         asyncio.create_task(backup_loop())
     tasks = [asyncio.create_task(crypto_checker()),
+             asyncio.create_task(platega_checker()),
              asyncio.create_task(expiry_checker(BOT)),
              asyncio.create_task(webhook_guard(BOT))]
     try:
